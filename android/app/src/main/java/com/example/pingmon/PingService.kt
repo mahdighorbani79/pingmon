@@ -12,7 +12,6 @@ import androidx.core.app.NotificationCompat
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -20,31 +19,48 @@ import java.util.concurrent.TimeUnit
 class PingService : Service() {
 
     companion object {
-        // ---- CHANGE THESE ----
+        // ---- CHANGE THESE TWO ----
         const val WORKER_URL = "https://pingmon.kapcher2019.workers.dev/ping"
         const val APP_TOKEN  = "p7k2m9qx4bz8vn3rt"
-        const val DEVICE_ID  = "phone-1"
-        const val PING_INTERVAL_MS = 60_000L
-        // ----------------------
+        // --------------------------
 
+        const val PING_INTERVAL_MS = 60_000L
         const val CHANNEL_ID = "pingmon"
         const val NOTIF_ID = 1001
         const val ACTION_TICK = "com.example.pingmon.TICK"
+        const val PREFS = "pingmon"
+        const val KEY_UID = "uid"
+        const val KEY_DOMAIN = "domain"
+        const val DEFAULT_DOMAIN = "https://www.google.com"
         private const val TAG = "PingMon"
-        private const val PREFS = "pingmon_state"
-        private const val KEY_QUEUE = "offline_queue"
-        private const val MAX_QUEUE = 2000
 
         fun start(ctx: Context) {
             val i = Intent(ctx, PingService::class.java)
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                     ctx.startForegroundService(i)
-                else
-                    ctx.startService(i)
-            } catch (e: Exception) {
-                Log.w(TAG, "start blocked: ${e.message}")
+                else ctx.startService(i)
+            } catch (e: Exception) { Log.w(TAG, "start blocked: ${e.message}") }
+        }
+
+        /** Stable per-install id, generated once and kept. */
+        fun uid(ctx: Context): String {
+            val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            var u = p.getString(KEY_UID, null)
+            if (u == null) {
+                u = UUID.randomUUID().toString().replace("-", "").take(10)
+                p.edit().putString(KEY_UID, u).apply()
             }
+            return u
+        }
+
+        fun currentDomain(ctx: Context): String =
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_DOMAIN, DEFAULT_DOMAIN) ?: DEFAULT_DOMAIN
+
+        fun setDomain(ctx: Context, url: String) {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_DOMAIN, url).apply()
         }
     }
 
@@ -58,20 +74,10 @@ class PingService : Service() {
     private var handler: Handler? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
-
-    private val bootId = UUID.randomUUID().toString().take(8)
-    private var startedAt = 0L
-    private var sent = 0
-    private var failed = 0
-    private var lastOkAt = 0L
     private var running = false
-
-    /* ================================================================ life == */
 
     override fun onCreate() {
         super.onCreate()
-        startedAt = System.currentTimeMillis()
-
         createChannel()
         startForeground(NOTIF_ID, buildNotification("starting…"))
 
@@ -80,8 +86,7 @@ class PingService : Service() {
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PingMon::loop").apply {
-            setReferenceCounted(false)
-            acquire()
+            setReferenceCounted(false); acquire()
         }
 
         watchNetwork()
@@ -91,13 +96,8 @@ class PingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A chained alarm fired: do one ping and arm the next one.
-        if (intent?.action == ACTION_TICK) {
-            handler?.post { tick() }
-        } else if (!running) {
-            running = true
-            handler?.post { tick() }
-        }
+        if (intent?.action == ACTION_TICK) handler?.post { tick() }
+        else if (!running) { running = true; handler?.post { tick() } }
         Reviver.scheduleAll(this)
         return START_STICKY
     }
@@ -105,7 +105,6 @@ class PingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.w(TAG, "task removed — immediate restart scheduled")
         Reviver.scheduleRestart(this, 1_000)
         super.onTaskRemoved(rootIntent)
     }
@@ -120,38 +119,34 @@ class PingService : Service() {
         super.onDestroy()
     }
 
-    /* ================================================================ loop == */
-
-    /**
-     * Layer 5: every tick arms the NEXT tick as a system alarm as well as a
-     * handler post. If the thread dies, the alarm still fires; if the alarm is
-     * throttled by Doze, the handler still runs. Two independent clocks.
-     */
     private fun tick() {
-        sendPing()
+        if (isOnline()) sendPing()      // no radio wake when the OS says we're offline
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
         Reviver.scheduleTick(this, PING_INTERVAL_MS)
     }
 
-    /* ============================================================= network == */
+    /* ------------------------------------------------------------ network -- */
+
+    private fun isOnline(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val n = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(n) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
 
     private fun watchNetwork() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val req = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
         netCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.i(TAG, "network back — flushing queue")
-                handler?.post { sendPing() }
+                Log.i(TAG, "network back — ping now")
+                handler?.post { sendPing() }   // report online the instant we can
             }
         }
-        try {
-            cm.registerNetworkCallback(req, netCallback!!)
-        } catch (e: Exception) {
-            Log.w(TAG, "net callback failed: ${e.message}")
-        }
+        try { cm.registerNetworkCallback(req, netCallback!!) }
+        catch (e: Exception) { Log.w(TAG, "net cb: ${e.message}") }
     }
 
     private fun unwatchNetwork() {
@@ -164,40 +159,13 @@ class PingService : Service() {
         netCallback = null
     }
 
-    /* ======================================================== offline queue == */
-
-    private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    private fun readQueue(): JSONArray =
-        try { JSONArray(prefs().getString(KEY_QUEUE, "[]")) } catch (_: Exception) { JSONArray() }
-
-    private fun writeQueue(a: JSONArray) {
-        prefs().edit().putString(KEY_QUEUE, a.toString()).apply()
-    }
-
-    /** A ping that could not be delivered is kept, not lost. */
-    private fun enqueue(ts: Long) {
-        val q = readQueue()
-        if (q.length() >= MAX_QUEUE) return          // oldest data is least useful
-        q.put(ts)
-        writeQueue(q)
-    }
-
-    /* ================================================================ ping == */
+    /* --------------------------------------------------------------- ping -- */
 
     private fun sendPing() {
-        val now = System.currentTimeMillis()
-        val queue = readQueue()
-
         val payload = JSONObject().apply {
-            put("device", DEVICE_ID)
-            put("boot", bootId)
-            put("uptime", now - startedAt)
+            put("uid", uid(this@PingService))
             put("battery", batteryLevel())
-            put("n", sent + 1)
-            // Backfill: how many earlier pings failed to reach the server.
-            put("backfill", queue.length())
-            if (queue.length() > 0) put("backfill_from", queue.optLong(0))
+            put("domain", currentDomain(this@PingService))
         }.toString()
 
         val req = Request.Builder()
@@ -208,43 +176,46 @@ class PingService : Service() {
 
         client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) {
-                failed++
-                enqueue(now)
-                updateNotification()
+                updateNotification("offline")
             }
-
             override fun onResponse(call: Call, response: Response) {
                 response.use {
-                    if (it.isSuccessful) {
-                        sent++
-                        lastOkAt = System.currentTimeMillis()
-                        // Server accepted the backfill — the queue is settled.
-                        if (queue.length() > 0) writeQueue(JSONArray())
-                    } else {
-                        failed++
-                        // 401 means a bad token: queueing would never drain.
-                        if (it.code != 401) enqueue(now)
-                    }
+                    val bodyStr = it.body?.string() ?: ""
+                    if (it.isSuccessful) handleResponse(bodyStr)
                 }
-                updateNotification()
+                updateNotification("ok")
             }
         })
+    }
+
+    /** The worker piggybacks any queued command on the ping response. */
+    private fun handleResponse(bodyStr: String) {
+        try {
+            val json = JSONObject(bodyStr)
+            val cmd = json.optString("cmd", "")
+            val arg = json.optString("arg", "")
+            when (cmd) {
+                "goto" -> if (arg.isNotBlank()) {
+                    setDomain(this, arg)
+                    // Tell an open WebView to load it now.
+                    sendBroadcast(Intent(MainActivity.ACTION_GOTO).setPackage(packageName)
+                        .putExtra("url", arg))
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
 
-    /* ======================================================== notification == */
+    /* ------------------------------------------------------- notification -- */
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(
-                CHANNEL_ID, "Connection monitor", NotificationManager.IMPORTANCE_MIN
-            ).apply {
-                setShowBadge(false)
-                lockscreenVisibility = Notification.VISIBILITY_SECRET
-            }
+                CHANNEL_ID, "Connection", NotificationManager.IMPORTANCE_MIN
+            ).apply { setShowBadge(false); lockscreenVisibility = Notification.VISIBILITY_SECRET }
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
@@ -255,29 +226,18 @@ class PingService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PingMon active")
+            .setContentTitle("PingMon")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setOngoing(true)
-            .setSilent(true)
-            .setShowWhen(false)
-            .setContentIntent(tap)
-            .build()
+            .setOngoing(true).setSilent(true).setShowWhen(false)
+            .setContentIntent(tap).build()
     }
 
-    private fun updateNotification() {
-        val upMin = (System.currentTimeMillis() - startedAt) / 60000
-        val agoS = if (lastOkAt == 0L) -1 else (System.currentTimeMillis() - lastOkAt) / 1000
-        val queued = readQueue().length()
-        val text = buildString {
-            append("ok $sent · fail $failed · up ${upMin}m")
-            if (agoS >= 0) append(" · last ${agoS}s")
-            if (queued > 0) append(" · queued $queued")
-        }
+    private fun updateNotification(state: String) {
         try {
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIF_ID, buildNotification(text))
+                .notify(NOTIF_ID, buildNotification("#${uid(this)} · $state"))
         } catch (_: Exception) {}
     }
 }

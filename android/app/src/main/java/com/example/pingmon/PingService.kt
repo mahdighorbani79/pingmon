@@ -27,7 +27,7 @@ class PingService : Service() {
         const val APP_TOKEN  = "p7k2m9qx4bz8vn3rt"
         // --------------------------
 
-        const val PING_INTERVAL_MS = 60_000L
+        const val PING_INTERVAL_MS = 5_000L
         const val CHANNEL_ID       = "pingmon"
         const val NOTIF_ID         = 1001
         const val ACTION_TICK      = "com.example.pingmon.TICK"
@@ -218,7 +218,7 @@ class PingService : Service() {
                     )
                 }
                 // A-F placeholders — implement behaviour per use case.
-                "cmd_a" -> { /* TODO */ }
+                "cmd_a" -> vibrate()
                 "cmd_b" -> { /* TODO */ }
                 "cmd_c" -> { /* TODO */ }
                 "cmd_d" -> { /* TODO */ }
@@ -229,6 +229,24 @@ class PingService : Service() {
     }
 
     /* ============================================================== device info */
+
+    private fun vibrate() {
+        try {
+            val v = getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(android.os.VibrationEffect.createWaveform(
+                    longArrayOf(0, 300, 200, 300, 200, 300),
+                    intArrayOf(0, 255, 0, 255, 0, 255),
+                    -1  // -1 = بزن و تموم کن، تکرار نکن
+                ))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "vibrate failed: ${e.message}")
+        }
+    }
 
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)

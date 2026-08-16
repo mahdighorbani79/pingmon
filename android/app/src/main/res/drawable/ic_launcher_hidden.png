@@ -1,0 +1,19 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Gray background -->
+    <path android:fillColor="#757575"
+        android:pathData="M8,0 L100,0 Q108,0 108,8 L108,100 Q108,108 100,108 L8,108 Q0,108 0,100 L0,8 Q0,0 8,0 Z"/>
+    <!-- 9 dots like a calculator/grid -->
+    <path android:fillColor="#EEEEEE"
+        android:pathData="
+        M26,26 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M54,26 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M82,26 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M26,54 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M54,54 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M82,54 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M26,82 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M54,82 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0
+        M82,82 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0"/>
+</vector>

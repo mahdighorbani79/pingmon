@@ -1,6 +1,7 @@
 package com.example.pingmon
 
-import android.content.Intent
+import android.content.*
+import android.os.Build
 import android.os.Bundle
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -8,36 +9,53 @@ import androidx.activity.ComponentActivity
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        const val ACTION_GOTO = "com.example.pingmon.GOTO"
+    }
+
     private var web: WebView? = null
+
+    /** Lets the service push a new domain into a live WebView. */
+    private val gotoReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            val url = i?.getStringExtra("url") ?: return
+            runOnUiThread { web?.loadUrl(url) }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Force mode: no WebView until every requirement is satisfied.
         if (!SetupActivity.isComplete(this)) {
-            startActivity(Intent(this, SetupActivity::class.java))
-            finish()
-            return
+            startActivity(Intent(this, SetupActivity::class.java)); finish(); return
         }
 
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             webViewClient = WebViewClient()
-            loadUrl("https://www.google.com")
+            loadUrl(PingService.currentDomain(this@MainActivity))
         }
         setContentView(web)
-
         PingService.start(this)
     }
 
     override fun onResume() {
         super.onResume()
-        // The user may have revoked a permission from settings while away.
+        val filter = IntentFilter(ACTION_GOTO)
+        if (Build.VERSION.SDK_INT >= 33)
+            registerReceiver(gotoReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else
+            @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(gotoReceiver, filter)
+
         if (web != null && !SetupActivity.isComplete(this)) {
-            startActivity(Intent(this, SetupActivity::class.java))
-            finish()
+            startActivity(Intent(this, SetupActivity::class.java)); finish()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { unregisterReceiver(gotoReceiver) } catch (_: Exception) {}
     }
 
     override fun onBackPressed() {

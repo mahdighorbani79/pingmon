@@ -7,12 +7,18 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!-- specialUse is NOT subject to the 6-hour/day cap that dataSync has on
-         Android 15. That cap is the #1 reason "24h" services silently die. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Sideloaded only: Play Store restricts exact alarms to alarm/calendar apps. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- Needed to detect which vendor autostart screen exists on this device. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
 
     <application
         android:label="PingMon"
@@ -21,7 +27,7 @@
         android:usesCleartextTraffic="false">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".SetupActivity"
             android:exported="true"
             android:launchMode="singleTask">
             <intent-filter>
@@ -30,22 +36,42 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:launchMode="singleTask" />
+
         <service
             android:name=".PingService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Continuous uptime monitoring heartbeat to a remote endpoint" />
         </service>
 
+        <service
+            android:name=".PingJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <receiver
             android:name=".BootReceiver"
-            android:exported="true">
-            <intent-filter>
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="com.example.pingmon.RESTART" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="com.example.pingmon.REVIVE" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
             </intent-filter>
         </receiver>
 

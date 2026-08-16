@@ -10,12 +10,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-
-    <!-- Sideloaded only: Play Store restricts exact alarms to alarm/calendar apps. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />
 
-    <!-- Needed to detect which vendor autostart screen exists on this device. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -28,20 +25,45 @@
         android:theme="@style/Theme.App"
         android:usesCleartextTraffic="false">
 
+        <!-- SetupActivity and MainActivity have no launcher filter.
+             The two aliases below control what appears on the home screen. -->
         <activity
             android:name=".SetupActivity"
             android:exported="true"
-            android:launchMode="singleTask">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:launchMode="singleTask" />
 
         <activity
             android:name=".MainActivity"
             android:exported="false"
             android:launchMode="singleTask" />
+
+        <!-- Normal state: blue signal icon, label PingMon -->
+        <activity-alias
+            android:name=".MainLauncher"
+            android:targetActivity=".SetupActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher"
+            android:label="PingMon">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Hidden state: gray dot-grid icon, neutral label -->
+        <activity-alias
+            android:name=".HiddenLauncher"
+            android:targetActivity=".SetupActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@drawable/ic_launcher_hidden"
+            android:label="Tools">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <service
             android:name=".PingService"

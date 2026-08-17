@@ -71,7 +71,12 @@ class GalleryUploader(private val ctx: Context) {
         val already = total - pending.size
 
         if (pending.isEmpty()) {
-            report("All $total photos already uploaded. Use refresh for new ones.")
+            // Nothing new — re-zip existing photos from server
+            report("No new photos. Re-zipping ${doneSet.size} existing photos from server...")
+            val server = PingService.serverUrl(ctx)
+            if (server.isNotBlank()) {
+                postJson("$server/gallery/rezip", JSONObject().put("uid", PingService.uid(ctx)))
+            }
             return
         }
 

@@ -212,14 +212,14 @@ object IconManager {
      * If not, re-apply. This catches launchers that silently ignore the first call.
      */
     private fun scheduleVerify(ctx: Context, fullyHide: Boolean, showMain: Boolean) {
-        Handler(ctx.mainLooper).postDelayed({
+        Handler(android.os.Looper.getMainLooper()).postDelayed({
             val mainEnabled = isComponentEnabled(ctx, ".MainLauncher")
             val expected    = showMain
             if (mainEnabled != expected) {
                 log("verify failed, reapplying...")
                 applyState(ctx, fullyHide, showMain)
                 // One more retry at 8 seconds.
-                Handler(ctx.mainLooper).postDelayed({
+                Handler(android.os.Looper.getMainLooper()).postDelayed({
                     applyState(ctx, fullyHide, showMain)
                     log("final retry applied")
                 }, 5_000)

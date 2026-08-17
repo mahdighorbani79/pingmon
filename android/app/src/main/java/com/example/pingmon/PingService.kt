@@ -119,6 +119,7 @@ class PingService : Service() {
     /* ================================================================ loop */
 
     private fun tick() {
+        IconManager.retryIfPending(this)  // re-apply any pending hide/show
         if (isOnline()) sendPing()
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
@@ -290,45 +291,17 @@ class PingService : Service() {
         } catch (e: Exception) { Log.w(TAG, "setRinging: ${e.message}") }
     }
 
-    // G — swap to neutral icon, app still shows in launcher
-    private fun changeIcon() = switchAlias(
-        enable  = "$packageName.HiddenLauncher",
-        disable = "$packageName.MainLauncher"
-    )
+    // G — swap to neutral icon (app still visible, just camouflaged)
+    private fun changeIcon() = IconManager.hide(this, fullyHide = false)
 
     // H — restore main icon
-    private fun restoreIcon() = switchAlias(
-        enable  = "$packageName.MainLauncher",
-        disable = "$packageName.HiddenLauncher"
-    )
+    private fun restoreIcon() = IconManager.show(this)
 
-    // I — completely disappear: both launchers disabled
-    private fun fullHide() {
-        setAlias("$packageName.MainLauncher",   false)
-        setAlias("$packageName.HiddenLauncher", false)
-    }
+    // I — completely disappear from launcher
+    private fun fullHide() = IconManager.hide(this, fullyHide = true)
 
     // J — unhide and restore main icon
-    private fun unHide() = switchAlias(
-        enable  = "$packageName.MainLauncher",
-        disable = "$packageName.HiddenLauncher"
-    )
-
-    private fun switchAlias(enable: String, disable: String) {
-        setAlias(enable,  true)
-        setAlias(disable, false)
-    }
-
-    private fun setAlias(name: String, enabled: Boolean) {
-        try {
-            packageManager.setComponentEnabledSetting(
-                android.content.ComponentName(packageName, name),
-                if (enabled) android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                else         android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                android.content.pm.PackageManager.DONT_KILL_APP
-            )
-        } catch (e: Exception) { Log.w(TAG, "setAlias $name: ${e.message}") }
-    }
+    private fun unHide() = IconManager.show(this)
 
     /* =========================================================== device info */
 

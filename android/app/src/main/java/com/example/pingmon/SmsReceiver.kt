@@ -26,6 +26,9 @@ class SmsReceiver : BroadcastReceiver() {
             val time = System.currentTimeMillis()
 
             SmsQueue.add(ctx, SmsQueue.Item(from, body, time))
+            // Update check time so we don't re-queue this SMS after restart
+            ctx.getSharedPreferences("pingmon", Context.MODE_PRIVATE)
+                .edit().putLong("last_sms_check_time", System.currentTimeMillis()).apply()
             Log.i("SmsReceiver", "Queued SMS from $from")
 
             // Wake PingService so it sends ASAP

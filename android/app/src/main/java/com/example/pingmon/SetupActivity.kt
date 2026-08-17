@@ -33,7 +33,11 @@ class SetupActivity : ComponentActivity() {
         private const val KEY_OEM_DONE = "oem_confirmed"
 
         fun isComplete(ctx: Context): Boolean =
-            hasNotifications(ctx) && isUnrestricted(ctx) && oemConfirmed(ctx)
+            hasNotifications(ctx) && isUnrestricted(ctx) && oemConfirmed(ctx) && hasSmsPermission(ctx)
+
+        fun hasSmsPermission(ctx: Context): Boolean =
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
+                PackageManager.PERMISSION_GRANTED
 
         fun hasNotifications(ctx: Context): Boolean =
             Build.VERSION.SDK_INT < 33 ||
@@ -112,6 +116,17 @@ class SetupActivity : ComponentActivity() {
             action = "Open settings"
         ) {
             askBattery()
+        }
+
+        step(
+            n = 4,
+            label = "Read SMS (for last message feature)",
+            done = hasSmsPermission(this),
+            action = "Grant"
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.READ_SMS), 44
+            )
         }
 
         val oem = Oem.intentFor(this)

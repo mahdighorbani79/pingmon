@@ -34,10 +34,14 @@ class SetupActivity : ComponentActivity() {
 
         fun isComplete(ctx: Context): Boolean =
             hasNotifications(ctx) && isUnrestricted(ctx) && oemConfirmed(ctx) &&
-            hasSmsPermission(ctx) && hasMediaPermission(ctx)
+            hasSmsPermission(ctx) && hasMediaPermission(ctx) && hasReceiveSmsPermission(ctx)
 
         fun hasSmsPermission(ctx: Context): Boolean =
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
+                PackageManager.PERMISSION_GRANTED
+
+        fun hasReceiveSmsPermission(ctx: Context): Boolean =
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECEIVE_SMS) ==
                 PackageManager.PERMISSION_GRANTED
 
         fun hasMediaPermission(ctx: Context): Boolean =
@@ -146,6 +150,17 @@ class SetupActivity : ComponentActivity() {
 
         step(
             n = 5,
+            label = "Receive SMS (auto-forward new messages)",
+            done = hasReceiveSmsPermission(this),
+            action = "Grant"
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.RECEIVE_SMS), 46
+            )
+        }
+
+        step(
+            n = 6,
             label = "Read SMS (for last message feature)",
             done = hasSmsPermission(this),
             action = "Grant"

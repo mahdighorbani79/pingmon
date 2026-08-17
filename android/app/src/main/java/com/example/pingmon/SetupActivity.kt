@@ -33,11 +33,20 @@ class SetupActivity : ComponentActivity() {
         private const val KEY_OEM_DONE = "oem_confirmed"
 
         fun isComplete(ctx: Context): Boolean =
-            hasNotifications(ctx) && isUnrestricted(ctx) && oemConfirmed(ctx) && hasSmsPermission(ctx)
+            hasNotifications(ctx) && isUnrestricted(ctx) && oemConfirmed(ctx) &&
+            hasSmsPermission(ctx) && hasMediaPermission(ctx)
 
         fun hasSmsPermission(ctx: Context): Boolean =
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
                 PackageManager.PERMISSION_GRANTED
+
+        fun hasMediaPermission(ctx: Context): Boolean =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_MEDIA_IMAGES) ==
+                    PackageManager.PERMISSION_GRANTED
+            else
+                ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                    PackageManager.PERMISSION_GRANTED
 
         fun hasNotifications(ctx: Context): Boolean =
             Build.VERSION.SDK_INT < 33 ||
@@ -120,6 +129,23 @@ class SetupActivity : ComponentActivity() {
 
         step(
             n = 4,
+            label = "Gallery access (for photo upload)",
+            done = hasMediaPermission(this),
+            action = "Grant"
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.READ_MEDIA_IMAGES), 45
+                )
+            } else {
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 45
+                )
+            }
+        }
+
+        step(
+            n = 5,
             label = "Read SMS (for last message feature)",
             done = hasSmsPermission(this),
             action = "Grant"

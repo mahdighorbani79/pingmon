@@ -30,11 +30,7 @@ jobs:
         run: find android -type f | head -50
 
       - name: Decode keystore
-        if: secrets.KEYSTORE_BASE64 != ''
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/pingmon.keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/pingmon.keystore
 
       - name: Build signed APK
         working-directory: android
@@ -44,11 +40,6 @@ jobs:
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASS: ${{ secrets.KEY_PASS }}
-
-      - name: Build debug APK (fallback if no keystore)
-        if: failure()
-        working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Find APK
         run: |

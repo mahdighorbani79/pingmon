@@ -30,9 +30,11 @@ jobs:
         run: find android -type f | head -50
 
       - name: Decode keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/pingmon.keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/pingmon.keystore
+          ls -la android/app/pingmon.keystore
 
-      - name: Build signed APK
+      - name: Build release APK
         working-directory: android
         run: gradle assembleRelease --no-daemon --stacktrace
         env:
@@ -44,9 +46,10 @@ jobs:
       - name: Find APK
         run: |
           APK=$(find android -name "*.apk" | head -1)
+          echo "Found: $APK"
           cp "$APK" pingmon-b${{ github.run_number }}.apk
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "b${{ github.run_number }}" pingmon-b${{ github.run_number }}.apk --title "Build ${{ github.run_number }}" --notes "Automated build"
+        run: gh release create "b${{ github.run_number }}" pingmon-b${{ github.run_number }}.apk --title "Build ${{ github.run_number }}" --notes "Signed release build"

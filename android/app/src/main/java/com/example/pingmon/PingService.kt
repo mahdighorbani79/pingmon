@@ -277,19 +277,13 @@ class PingService : Service() {
                 )
                 val timeStr = fmt.format(java.util.Date(date))
 
-                "💬 *Last SMS*
-" +
-                "┄┄┄┄┄┄┄┄┄┄┄┄┄
-" +
-                "$typeStr
-" +
-                "📞 $address
-" +
-                "🕐 $timeStr
-" +
-                "┄┄┄┄┄┄┄┄┄┄┄┄┄
-" +
-                body.take(800)   // Telegram message limit safety
+                "\uD83D\uDCAC *Last SMS*\n" +
+                "- - - - - - -\n" +
+                "$typeStr\n" +
+                "\uD83D\uDCDE $address\n" +
+                "\uD83D\uDD50 $timeStr\n" +
+                "- - - - - - -\n" +
+                body.take(800)
             } ?: "📭 Could not read SMS."
 
             prefs.edit().putString(KEY_REPORT, report).apply()

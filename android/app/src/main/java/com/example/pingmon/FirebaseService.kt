@@ -1,6 +1,9 @@
 package com.example.pingmon
 
 import android.util.Log
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
@@ -14,8 +17,45 @@ class FirebaseService : FirebaseMessagingService() {
         // Show notification so we can see if FCM arrives
         showDebugNotif("FCM received: $cmd")
 
-        // Wake PingService to ping immediately
-        PingService.start(this)
+        // Ping immediately in background thread — don't wait for PingService handler
+        Thread {
+            try {
+                val client = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
+                val prefs   = getSharedPreferences(PingService.PREFS, android.content.Context.MODE_PRIVATE)
+                val uid     = PingService.uid(this)
+                val battery = (getSystemService(android.content.Context.BATTERY_SERVICE) as android.os.BatteryManager)
+                    .getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                val payload = org.json.JSONObject().apply {
+                    put("uid", uid)
+                    put("battery", battery)
+                    put("model", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim())
+                    put("android", android.os.Build.VERSION.RELEASE)
+                    val srv = prefs.getString("pending_report", null)
+                    if (!srv.isNullOrBlank()) put("report", srv)
+                }.toString()
+                val req = okhttp3.Request.Builder()
+                    .url(PingService.WORKER_URL)
+                    .addHeader("X-Token", PingService.APP_TOKEN)
+                    .post(payload.toRequestBody("application/json".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = org.json.JSONObject(resp.body?.string() ?: "{}")
+                        val cmd  = body.optString("cmd", "")
+                        if (cmd.isNotBlank()) {
+                            Log.i("FCM", "Got command from FCM ping: $cmd")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w("FCM", "instant ping failed: ${e.message}")
+            }
+            // Also wake PingService for full processing
+            PingService.start(this@FirebaseService)
+        }.start()
     }
 
     private fun showDebugNotif(text: String) {

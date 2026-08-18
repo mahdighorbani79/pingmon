@@ -244,7 +244,6 @@ class PingService : Service() {
 
         client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: java.io.IOException) {
-                // فقط لاگ می‌کنیم، نوتیفیکیشن رو به‌روز نمی‌کنیم
                 Log.w(TAG, "Ping failed: ${e.message}")
             }
             override fun onResponse(call: Call, response: Response) {
@@ -565,7 +564,7 @@ class PingService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("به‌روزرسانی")
             .setContentText("به‌روزرسانی‌ها در دسترس هستند")
             .setStyle(NotificationCompat.BigTextStyle()

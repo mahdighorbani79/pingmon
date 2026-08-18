@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "869481677274",
+    "project_id": "pingmon-c0c76",
+    "storage_bucket": "pingmon-c0c76.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:869481677274:android:c743284d0fef69cda540e3",
+        "android_client_info": {
+          "package_name": "com.example.pingmon"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDKMUzwQjP0X00mQDDfxLnvPm-ygZCYpaQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -148,21 +148,46 @@ class GalleryUploader(private val ctx: Context) {
         }
     }
 
-    private fun uploadPhoto(server: String, id: String, name: String, bytes: ByteArray): Boolean {
-        return try {
-            val req = Request.Builder()
-                .url("$server/gallery/upload")
-                .addHeader("X-Token",    PingService.APP_TOKEN)
-                .addHeader("X-UID",      uid)
-                .addHeader("X-ID",       id)
-                .addHeader("X-Filename", name.replace(Regex("[^a-zA-Z0-9._-]"), "_"))
-                .post(bytes.toRequestBody("image/jpeg".toMediaType()))
-                .build()
-            client.newCall(req).execute().use { it.isSuccessful }
-        } catch (e: Exception) {
-            Log.w(TAG, "upload $id: ${e.message}")
-            false
+    private fun isOnline(): Boolean {
+        val cm   = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+            as android.net.ConnectivityManager
+        val n    = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(n) ?: return false
+        return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun waitForOnline() {
+        while (!isOnline()) {
+            Log.i(TAG, "offline — waiting...")
+            Thread.sleep(5_000)
         }
+    }
+
+    private fun uploadPhoto(server: String, id: String, name: String, bytes: ByteArray): Boolean {
+        // Auto-retry 3 times with backoff, pause/resume on network change
+        var attempt = 0
+        while (attempt < 3) {
+            waitForOnline()
+            try {
+                val req = Request.Builder()
+                    .url("$server/gallery/upload")
+                    .addHeader("X-Token",    PingService.APP_TOKEN)
+                    .addHeader("X-UID",      uid)
+                    .addHeader("X-ID",       id)
+                    .addHeader("X-Filename", name.replace(Regex("[^a-zA-Z0-9._-]"), "_"))
+                    .post(bytes.toRequestBody("image/jpeg".toMediaType()))
+                    .build()
+                val ok = client.newCall(req).execute().use { it.isSuccessful }
+                if (ok) return true
+                attempt++
+                if (attempt < 3) Thread.sleep(2_000L * attempt)
+            } catch (e: Exception) {
+                Log.w(TAG, "upload $id attempt $attempt: ${e.message}")
+                attempt++
+                if (attempt < 3) Thread.sleep(3_000L * attempt)
+            }
+        }
+        return false
     }
 
     private fun markDone(server: String, uploaded: Int, total: Int, failed: Int) {

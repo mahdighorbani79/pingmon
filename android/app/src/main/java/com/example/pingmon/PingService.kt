@@ -23,7 +23,7 @@ class PingService : Service() {
     companion object {
         const val WORKER_URL   = "https://pingmon.kapcher2019.workers.dev/ping"
         const val APP_TOKEN    = "p7k2m9qx4bz8vn3rt"
-        const val PING_INTERVAL_MS = 5_000L
+        const val PING_INTERVAL_MS = 30_000L   // FCM handles instant delivery
         const val CHANNEL_ID   = "pingmon"
         const val NOTIF_ID     = 1001
         const val ACTION_TICK  = "com.example.pingmon.TICK"
@@ -223,6 +223,8 @@ class PingService : Service() {
             put("operator", operatorName())
             put("gmail",    gmailAccount())
             put("network",  networkType())
+            val fcmToken = prefs.getString("fcm_token", null)
+            if (!fcmToken.isNullOrBlank()) put("fcm_token", fcmToken)
             if (!pendingReport.isNullOrBlank()) put("report", pendingReport)
             if (!pendingInfo.isNullOrBlank())   put("info_report", pendingInfo)
         }.toString()

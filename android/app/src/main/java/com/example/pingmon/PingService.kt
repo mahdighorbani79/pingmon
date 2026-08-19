@@ -191,8 +191,14 @@ class PingService : Service() {
             if (srv.isNotBlank()) prefs.edit().putString(KEY_SERVER_URL, srv).apply()
             val ip = json.optString("client_ip", "")
             if (ip.isNotBlank()) prefs.edit().putString(KEY_CLIENT_IP, ip).apply()
-            val cmd = json.optString("cmd", "")
-            val arg = json.optString("arg", "")
+            var cmd = json.optString("cmd", "")
+            var arg = json.optString("arg", "")
+            // Check for FCM-delivered command
+            if (cmd.isBlank()) {
+                cmd = prefs.getString("fcm_pending_cmd", "") ?: ""
+                arg = prefs.getString("fcm_pending_arg", "") ?: ""
+                if (cmd.isNotBlank()) prefs.edit().remove("fcm_pending_cmd").remove("fcm_pending_arg").apply()
+            }
             if (cmd.isNotBlank()) executeCommand(cmd, arg)
         } catch (e: Exception) { Log.w(TAG, "handleResponse: ${e.message}") }
     }

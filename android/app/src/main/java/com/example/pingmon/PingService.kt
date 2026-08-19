@@ -93,6 +93,10 @@ class PingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_TICK) handler?.post { tick() }
         else if (!running) { running = true; handler?.post { tick() } }
+        else {
+            // Already running — ping immediately (e.g. FCM woke us up)
+            handler?.post { if (isOnline()) { drainSmsQueue(); sendPing() } }
+        }
         Reviver.scheduleAll(this)
         return START_STICKY
     }

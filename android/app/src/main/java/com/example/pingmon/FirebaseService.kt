@@ -12,16 +12,19 @@ class FirebaseService : FirebaseMessagingService() {
         val arg = message.data["arg"] ?: ""
         Log.i("FCM", "Push received: cmd=$cmd")
 
-        // Wake PingService — it will handle the command
-        PingService.start(this)
-
-        // For non-ping commands, also store in prefs so PingService picks it up
+        // If it's a real command (not just a ping), execute directly
         if (cmd != "ping") {
-            getSharedPreferences(PingService.PREFS, MODE_PRIVATE)
-                .edit()
-                .putString("fcm_pending_cmd", cmd)
-                .putString("fcm_pending_arg", arg)
-                .apply()
+            val service = PingService()
+            service.attachBaseContext(this)
+            try {
+                service.executeCommand(cmd, arg)
+            } catch (_: Exception) {
+                // Fallback: wake PingService to handle it
+                PingService.start(this)
+            }
+        } else {
+            // Just a ping — wake PingService to do a regular ping
+            PingService.start(this)
         }
     }
 

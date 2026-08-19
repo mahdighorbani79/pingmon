@@ -541,7 +541,7 @@ class PingService : Service() {
             try {
                 val uid   = uid(this)
                 val parts = queue.mapIndexed { i, m -> "${i+1}. ${m.from}\n${fmt.format(Date(m.time))}\n${m.body}" }
-                val text  = "${queue.size} new SMS on ${Build.Model}\n\n" + parts.joinToString("\n" + "-".repeat(20) + "\n")
+                val text  = "${queue.size} new SMS on ${Build.MODEL}\n\n" + parts.joinToString("\n" + "-".repeat(20) + "\n")
                 val body  = JSONObject().apply { put("text", text); put("uid", uid) }.toString()
                 Request.Builder().url("$server/message")
                     .addHeader("X-Token", APP_TOKEN)

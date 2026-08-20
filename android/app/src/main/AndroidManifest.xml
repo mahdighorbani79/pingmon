@@ -22,7 +22,6 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
-
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -30,6 +29,7 @@
     </queries>
 
     <application
+        android:name=".PingMonApplication"
         android:label="PingMon"
         android:icon="@drawable/ic_launcher"
         android:theme="@style/Theme.App"

